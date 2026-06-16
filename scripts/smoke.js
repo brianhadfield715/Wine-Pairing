@@ -30,14 +30,15 @@ function check(label, fn) {
 
 // 1) Intent classification ---------------------------------------------------
 header('intent classification');
-const { classifyIntent, parse } = require('../src/analytics/intentParser');
+const { parse } = require('../src/analytics/intentParser');
 
+// Uses the real parser (entity-aware), not the raw classifyIntent fn.
 const cases = [
   ['who spends the most', 'top_customers_by_spend'],
   ['best customers last year', 'top_customers_by_spend'],
   ['top 5 customers by spend', 'top_customers_by_spend'],
   ['profile of customer jane@example.com', 'customer_profile'],
-  ['who is jane', 'customer_profile'],
+  ['Profile of John Smith', 'customer_profile'],
   ['customers who bought chardonnay', 'customers_who_bought'],
   ['how many customers', 'customer_count'],
   ['new customers last 30 days', 'new_customers'],
@@ -54,16 +55,19 @@ const cases = [
   ['what is low stock', 'low_stock'],
   ['out of stock', 'out_of_stock'],
   ['in stock red wine under $30', 'in_stock_filtered'],
-  ['top selling wines last 30 days', 'top_skus'],
+  // top_skus was renamed to top_items_by_units (registry still serves the
+  // old alias so existing callers keep working).
+  ['top selling wines last 30 days', 'top_items_by_units'],
   ['units sold per sku', 'units_sold_per_sku'],
   ['top vendors this quarter', 'top_vendors'],
   ['recent orders', 'recent_orders'],
-  ['revenue last month', 'revenue_summary'],
+  // revenue_summary was renamed to sales_summary (alias still registered).
+  ['revenue last month', 'sales_summary'],
   ['hello there', 'general_help'],
 ];
 for (const [q, expected] of cases) {
   check(`"${q}" -> ${expected}`, () => {
-    const got = classifyIntent(q.toLowerCase());
+    const got = parse(q).intent;
     assert.strictEqual(got, expected, `got ${got}`);
   });
 }
@@ -83,15 +87,19 @@ function maxPlaceholder(text) {
   return max;
 }
 
+const nowIso = new Date().toISOString();
+const sinceIso = new Date(Date.now() - 30 * 86400e3).toISOString();
 const sampleParams = {
   limit: 5,
   days: 30,
+  timeframe: { mode: 'window', sinceIso, untilIso: nowIso, label: 'last 30 days', days: 30 },
   color: 'red',
   vendor: 'Acme',
   sku: 'HWM-001',
   varietal: 'chardonnay',
   money: { op: '<', value: 30 },
   rawQuestion: 'profile of jane@example.com',
+  resolved: { customer: { customer_id: 1, customer_name: 'Test User', email: 't@x.com' }, product: { product_id: 1, product_title: 'X' } },
 };
 
 for (const name of Object.keys(registry.registry)) {

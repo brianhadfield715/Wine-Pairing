@@ -15,6 +15,8 @@
     "smoke": "node scripts/smoke.js",
     "smoke:orders": "node scripts/smoke_orders_sync.js",
     "smoke:basket": "node scripts/smoke_basket_live.js",
+    "smoke:manager": "node scripts/smoke_manager_qa.js",
+    "smoke:all": "node scripts/smoke.js && node scripts/smoke_basket_live.js && node scripts/smoke_orders_sync.js && node scripts/smoke_manager_qa.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

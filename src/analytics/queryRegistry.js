@@ -70,6 +70,35 @@ const registry = {
   sku_inventory:           { builder: b.skuInventory,         describe: 'Inventory snapshot for a single SKU.', domain: 'inventory' },
   sku_avg_price:           { builder: b.skuAvgPrice,          describe: 'Average / min / max selling price for a SKU.', domain: 'sales' },
   sku_last_sold:           { builder: b.skuLastSold,          describe: 'When was a given SKU last sold.', domain: 'sales' },
+
+  // --- Time-series ---
+  sales_time_series:       { builder: b.salesTimeSeries,      describe: 'Storewide revenue/units/orders/AOV grouped by day/week/month.', domain: 'revenue' },
+
+  // --- Customer units bought ---
+  customer_units_bought:   { builder: b.customerUnitsBought,  describe: 'Total units a single customer purchased in window.', domain: 'customers', needsCustomer: true },
+
+  // --- Inventory value (RETAIL only — cost data not in synced schema) ---
+  inventory_value_total:       { builder: b.inventoryValueTotal,       describe: 'Total retail value of current on-hand inventory.',         domain: 'inventory' },
+  inventory_value_by_vendor:   { builder: b.inventoryValueByVendor,    describe: 'Retail inventory value broken down by vendor.',           domain: 'inventory' },
+  inventory_value_by_category: { builder: b.inventoryValueByCategory,  describe: 'Retail inventory value broken down by product category.', domain: 'inventory' },
+  inventory_value_dead:        { builder: b.inventoryValueDead,        describe: 'Retail value of dead inventory (no sales in N days).',    domain: 'inventory' },
+  inventory_value_low_stock:   { builder: b.inventoryValueLowStock,    describe: 'Retail value of low-stock inventory.',                    domain: 'inventory' },
+
+  // --- Inventory counts ---
+  inventory_count_in_stock:     { builder: b.inventoryCountInStock,     describe: 'How many products / SKUs have inventory on hand.',       domain: 'inventory' },
+  inventory_count_out_of_stock: { builder: b.inventoryCountOutOfStock,  describe: 'How many products / SKUs are out of stock.',             domain: 'inventory' },
+  inventory_count_low_stock:    { builder: b.inventoryCountLowStock,    describe: 'How many products / SKUs are at or below a low-stock threshold.', domain: 'inventory' },
+  inventory_count_threshold:    { builder: b.inventoryCountThreshold,   describe: 'How many products / SKUs have more than / fewer than N units.', domain: 'inventory' },
+  inventory_units_on_hand:      { builder: b.inventoryUnitsOnHand,      describe: 'Total on-hand unit count across the store (or filtered).', domain: 'inventory' },
+
+  // --- Data coverage / metadata ---
+  data_coverage_orders:    { builder: b.dataCoverageOrders,    describe: 'Order data date range and count.',                              domain: 'meta' },
+  data_coverage_customers: { builder: b.dataCoverageCustomers, describe: 'Customer data totals.',                                         domain: 'meta' },
+  data_coverage_products:  { builder: b.dataCoverageProducts,  describe: 'Product / variant counts.',                                     domain: 'meta' },
+  data_coverage_all:       { builder: b.dataCoverageAll,       describe: 'Combined order / customer / product coverage.',                 domain: 'meta' },
+
+  // --- Product detail by partial-title hint ---
+  product_detail_search:   { builder: b.productDetailSearch,   describe: 'Product detail resolved by partial title / keyword.', domain: 'sales', needsProductSearch: true },
 };
 
 function get(intent) { return registry[intent] || null; }

@@ -17,7 +17,8 @@
     "smoke:basket": "node scripts/smoke_basket_live.js",
     "smoke:manager": "node scripts/smoke_manager_qa.js",
     "smoke:manager:v2": "node scripts/smoke_manager_qa_v2.js",
-    "smoke:all": "node scripts/smoke.js && node scripts/smoke_basket_live.js && node scripts/smoke_orders_sync.js && node scripts/smoke_manager_qa.js && node scripts/smoke_manager_qa_v2.js",
+    "smoke:manager:v3": "node scripts/smoke_manager_qa_v3.js",
+    "smoke:all": "node scripts/smoke.js && node scripts/smoke_basket_live.js && node scripts/smoke_orders_sync.js && node scripts/smoke_manager_qa.js && node scripts/smoke_manager_qa_v2.js && node scripts/smoke_manager_qa_v3.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

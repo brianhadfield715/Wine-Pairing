@@ -376,6 +376,140 @@ const F = {
     return `${r.product_title || r.sku} last sold ${shortDate(r.last_sold_at)}. Lifetime ${intish(r.units_sold)} units · 30d ${intish(r.units_sold_30d)} · on hand ${intish(r.on_hand)}.`;
   },
 
+  // ----- time-series ----------------------------------------------------
+  sales_time_series(rows, plan) {
+    if (!rows.length) return `No sales${windowLabel(plan)}.`;
+    const grain = (plan && plan.params && plan.params.grain) || 'day';
+    const metric = (plan && plan.params && plan.params.metric) || 'revenue';
+    const fmt = (r) => {
+      if (metric === 'orders') return intish(r.orders);
+      if (metric === 'units')  return intish(r.units);
+      if (metric === 'aov')    return money(r.average_order_value);
+      return money(r.net_revenue);
+    };
+    const labels = rows.map((r) => {
+      const d = new Date(r.bucket);
+      if (grain === 'day')   return d.toISOString().slice(0, 10);
+      if (grain === 'week')  return `wk ${d.toISOString().slice(0, 10)}`;
+      if (grain === 'month') return d.toISOString().slice(0, 7);
+      return d.toISOString().slice(0, 10);
+    });
+    const seq = rows.map(fmt).join(', ');
+    const totals = rows.reduce(
+      (a, r) => ({
+        orders: a.orders + Number(r.orders || 0),
+        units:  a.units  + Number(r.units  || 0),
+        net:    a.net    + Number(r.net_revenue || 0),
+      }),
+      { orders: 0, units: 0, net: 0 }
+    );
+    const totalsLine =
+      metric === 'orders' ? `Total: ${intish(totals.orders)} orders.`
+      : metric === 'units' ? `Total: ${intish(totals.units)} units.`
+      : metric === 'aov'   ? `Avg AOV: ${money(totals.orders ? totals.net / totals.orders : 0)}.`
+      : `Total: ${money(totals.net)} across ${intish(totals.orders)} orders.`;
+    return `${(plan && plan.timeframe && plan.timeframe.label) || ''} by ${grain} (${labels.length} buckets):\n${labels.map((l, i) => `${l}: ${fmt(rows[i])}`).join('\n')}\n${totalsLine}`;
+  },
+
+  // ----- customer units bought ------------------------------------------
+  customer_units_bought(rows, plan) {
+    const r = rows[0] || {};
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    if (!r.units) return `${who || '(unknown)'} has no recorded purchases${windowLabel(plan)}.`;
+    return `${who || 'Customer'} has bought ${intish(r.units)} units${windowLabel(plan)} across ${intish(r.order_count)} orders (${money(r.total_spend)}).`;
+  },
+
+  // ----- inventory value -------------------------------------------------
+  inventory_value_total(rows, plan) {
+    const r = rows[0] || {};
+    const valuation = plan && plan.params && /cost/.test(plan.params.rawQuestion || '') ? 'cost' : 'retail';
+    if (valuation === 'cost') {
+      return `Cost-based inventory value is not available in the current synced data. Retail inventory value is ${money(r.retail_value)} across ${intish(r.sku_count)} SKUs (${intish(r.on_hand_units)} units on hand).`;
+    }
+    return `Current retail inventory value is ${money(r.retail_value)} across ${intish(r.sku_count)} in-stock SKUs (${intish(r.on_hand_units)} units on hand).`;
+  },
+
+  inventory_value_by_vendor(rows) {
+    if (!rows.length) return 'No inventory found.';
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.vendor} — ${money(r.retail_value)} (${intish(r.on_hand_units)} units · ${intish(r.sku_count)} SKUs)`
+    );
+    return `Inventory value by vendor (retail):\n${top.join('\n')}`;
+  },
+
+  inventory_value_by_category(rows) {
+    if (!rows.length) return 'No inventory found.';
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.category} — ${money(r.retail_value)} (${intish(r.on_hand_units)} units · ${intish(r.sku_count)} SKUs)`
+    );
+    return `Inventory value by category (retail):\n${top.join('\n')}`;
+  },
+
+  inventory_value_dead(rows, plan) {
+    const r = rows[0] || {};
+    const days = plan && plan.params && plan.params.day_count;
+    return `Dead inventory (no sales in ${days || 90} days): ${money(r.retail_value)} retail across ${intish(r.sku_count)} SKUs (${intish(r.on_hand_units)} units).`;
+  },
+
+  inventory_value_low_stock(rows) {
+    const r = rows[0] || {};
+    return `Low-stock inventory value: ${money(r.retail_value)} across ${intish(r.sku_count)} SKUs (${intish(r.on_hand_units)} units).`;
+  },
+
+  // ----- inventory counts -----------------------------------------------
+  inventory_count_in_stock(rows) {
+    const r = rows[0] || {};
+    return `Currently, ${intish(r.product_count)} products have inventory on hand (${intish(r.sku_count)} SKUs · ${intish(r.on_hand_units)} units).`;
+  },
+  inventory_count_out_of_stock(rows) {
+    const r = rows[0] || {};
+    return `${intish(r.product_count)} products are currently out of stock (${intish(r.sku_count)} SKUs).`;
+  },
+  inventory_count_low_stock(rows) {
+    const r = rows[0] || {};
+    return `${intish(r.product_count)} products are at or below ${intish(r.threshold)} units on hand (${intish(r.sku_count)} SKUs).`;
+  },
+  inventory_count_threshold(rows, plan) {
+    const r = rows[0] || {};
+    const c = (plan && plan.meta && plan.meta.params && plan.meta.params.units_below) || (plan && plan.params && plan.params.unitsBelow);
+    const m = c || (plan && plan.params && plan.params.money);
+    const tag = m
+      ? (m.op === '<' ? `< ${m.value} units` : m.op === '>' ? `> ${m.value} units` : 'in range')
+      : 'in stock';
+    return `${intish(r.product_count)} products match ${tag} (${intish(r.sku_count)} SKUs).`;
+  },
+  inventory_units_on_hand(rows, plan) {
+    const r = rows[0] || {};
+    const filter = plan && plan.params && (plan.params.color || plan.params.varietal || plan.params.vendor || plan.params.category);
+    const tag = filter ? ` matching "${filter}"` : '';
+    return `There are currently ${intish(r.on_hand_units)} units on hand across the store${tag} (${intish(r.product_count)} products, ${intish(r.sku_count)} SKUs).`;
+  },
+
+  // ----- data coverage --------------------------------------------------
+  data_coverage_orders(rows) {
+    const r = rows[0] || {};
+    if (!r.earliest_order_at) return 'No orders are loaded in the analytics database yet.';
+    return `Order data currently covers ${shortDate(r.earliest_order_at)} through ${shortDate(r.latest_order_at)} across ${intish(r.total_orders)} orders (${intish(r.active_orders)} not cancelled).`;
+  },
+  data_coverage_customers(rows) {
+    const r = rows[0] || {};
+    return `Customer data: ${intish(r.total_customers)} customers (${intish(r.customers_with_orders)} with orders). Earliest record ${shortDate(r.earliest_customer_at)}, latest ${shortDate(r.latest_customer_at)}.`;
+  },
+  data_coverage_products(rows) {
+    const r = rows[0] || {};
+    return `Product data: ${intish(r.total_products)} products (${intish(r.active_products)} active) · ${intish(r.total_variants)} variants · ${intish(r.products_in_stock)} products currently in stock.`;
+  },
+  data_coverage_all(rows) {
+    const r = rows[0] || {};
+    if (!r.earliest_order_at) return 'No order data loaded yet. Products and customers may still be present.';
+    return `Coverage: orders ${shortDate(r.earliest_order_at)} → ${shortDate(r.latest_order_at)} (${intish(r.total_orders)} orders) · ${intish(r.total_customers)} customers · ${intish(r.total_products)} products (${intish(r.products_in_stock)} in stock) · ${intish(r.total_variants)} variants.`;
+  },
+
+  // ----- product_detail_search (reuses product_detail formatter) --------
+  product_detail_search(rows, plan) {
+    return F.product_detail(rows, plan);
+  },
+
   // -------- inventory -----------------------------------------------------
   low_stock(rows) {
     if (!rows.length) return 'No low-stock variants right now.';

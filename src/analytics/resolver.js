@@ -98,4 +98,64 @@ async function resolveProduct({ productHint, sku }) {
   return { status: 'ambiguous', candidates: r.rows, hint: productHint };
 }
 
-module.exports = { resolveCustomer, resolveProduct };
+/**
+ * Stronger product resolution used by /product_detail_search/.
+ *
+ * Strategy (case-insensitive throughout):
+ *   1. SKU first if present                          (single hit -> ok)
+ *   2. Exact title match                              (single hit -> ok)
+ *   3. Title starts-with match                        (single hit -> ok)
+ *   4. Title contains match                           (1 hit -> ok; many -> ambiguous)
+ *
+ * Disambiguation rows are enriched with a current-inventory summary so
+ * the staff can pick by SKU/price/stock.
+ */
+async function resolveProductByHint({ productHint, sku }) {
+  if (sku) return resolveProduct({ productHint: null, sku });
+  if (!productHint) return { status: 'not_found', hint: null };
+
+  const hint = productHint.trim();
+  const baseCols = `
+    p.id as product_id, p.title as product_title, p.vendor, p.handle,
+    (select coalesce(sum(on_hand), 0)::int from vw_current_inventory v
+       where v.product_id = p.id) as on_hand_total,
+    (select coalesce(min(price), 0)::numeric(12,2) from variants v
+       where v.product_id = p.id) as min_price,
+    (select sku from variants v where v.product_id = p.id
+       order by position nulls last limit 1) as primary_sku
+  `;
+
+  // 2) exact case-insensitive title
+  let r = await db.query(
+    `select ${baseCols} from products p where lower(p.title) = lower($1) limit 5`,
+    [hint]
+  );
+  if (r.rows.length === 1) return { status: 'ok', product: r.rows[0] };
+  if (r.rows.length > 1)   return { status: 'ambiguous', candidates: r.rows, hint };
+
+  // 3) starts-with
+  r = await db.query(
+    `select ${baseCols} from products p
+      where lower(p.title) like lower($1)
+      order by length(p.title) asc
+      limit 10`,
+    [`${hint}%`]
+  );
+  if (r.rows.length === 1) return { status: 'ok', product: r.rows[0] };
+  if (r.rows.length > 1)   return { status: 'ambiguous', candidates: r.rows, hint };
+
+  // 4) contains
+  r = await db.query(
+    `select ${baseCols} from products p
+      where lower(p.title) like lower($1)
+      order by length(p.title) asc
+      limit 10`,
+    [`%${hint}%`]
+  );
+  if (r.rows.length === 1) return { status: 'ok', product: r.rows[0] };
+  if (r.rows.length > 1)   return { status: 'ambiguous', candidates: r.rows, hint };
+
+  return { status: 'not_found', hint };
+}
+
+module.exports = { resolveCustomer, resolveProduct, resolveProductByHint };

@@ -83,9 +83,103 @@ function extractTwoVarietals(q) {
 function classifyIntent(qRaw, ent = {}) {
   const q = qRaw.toLowerCase();
 
+  // ---- 0. Meta / data-coverage questions ----------------------------------
+  // These fire before everything else because their phrasing is unambiguous.
+  if (
+    /\b(?:what\s+(?:date\s+range|dates?|period)\s+(?:does|do)\s+the\s+order\s+(?:data|records))/.test(q) ||
+    /\bhow\s+far\s+back\s+does\s+the\s+order\s+data/.test(q) ||
+    /\bwhat\s+is\s+the\s+(?:earliest|latest)\s+order\s+date/.test(q) ||
+    /\bwhat\s+order\s+(?:history|date\s+range)\s+(?:do\s+we\s+(?:currently\s+)?have|is\s+currently\s+synced)/.test(q) ||
+    /\bdo\s+we\s+have\s+full[- ]?year\s+order\s+data/.test(q) ||
+    /\bhow\s+current\s+is\s+the\s+order\s+data/.test(q) ||
+    /\bwhat\s+was\s+the\s+latest\s+order\s+imported/.test(q) ||
+    /\bhow\s+many\s+orders\s+are\s+(?:in|stored\s+in)\s+the\s+(?:analytics\s+)?database/.test(q)
+  ) {
+    return 'data_coverage_orders';
+  }
+  if (
+    /\bwhat\s+date\s+range\s+does\s+customer\s+data/.test(q) ||
+    /\bhow\s+many\s+customers\s+are\s+(?:in|stored\s+in)\s+the\s+(?:analytics\s+)?database/.test(q)
+  ) {
+    return 'data_coverage_customers';
+  }
+  if (
+    /\bhow\s+many\s+products\s+are\s+(?:in|stored\s+in)\s+the\s+(?:analytics\s+)?database/.test(q)
+  ) {
+    return 'data_coverage_products';
+  }
+  if (
+    /\b(?:current\s+)?data\s+coverage\b|\bwhat\s+is\s+the\s+(?:current\s+)?data\s+coverage\b|\bdate\s+range\s+does\s+sales\s+data/.test(q)
+  ) {
+    return 'data_coverage_all';
+  }
+
+  // ---- 0.5 Inventory value (retail by default; cost flagged unavailable) -
+  if (
+    /\b(?:what\s+is\s+|show\s+me\s+|tell\s+me\s+)?(?:our\s+|the\s+)?(?:total\s+|retail\s+|cost\s+|on[- ]hand\s+)?inventory\s+value\b/.test(q) ||
+    /\bvalue\s+of\s+(?:our\s+|the\s+)?(?:current\s+|on[- ]hand\s+)?(?:inventory|stock(?:\s+on\s+hand)?)\b/.test(q) ||
+    /\b(?:retail|cost)\s+inventory\s+value\b/.test(q) ||
+    /\bvalue\s+of\s+low[- ]?stock\s+items\b/.test(q) ||
+    /\bvalue\s+of\s+inventory\s+that\s+has\s+not\s+sold/.test(q) ||
+    /\binventory\s+value\s+by\s+(?:vendor|category|color|varietal|product\s+type)\b/.test(q) ||
+    /\bwhich\s+vendors\s+represent\s+the\s+most\s+inventory\s+value\b/.test(q) ||
+    /\bwhich\s+products\s+carry\s+the\s+most\s+inventory\s+value\b/.test(q)
+  ) {
+    if (/by\s+vendor\b|which\s+vendors\s+represent/.test(q)) return 'inventory_value_by_vendor';
+    if (/by\s+category\b|by\s+(?:color|varietal|product\s+type)\b/.test(q)) return 'inventory_value_by_category';
+    if (/dead\s+inventory|has\s+not\s+sold/.test(q)) return 'inventory_value_dead';
+    if (/low[- ]?stock/.test(q)) return 'inventory_value_low_stock';
+    return 'inventory_value_total';
+  }
+
+  // ---- 0.6 Inventory units on hand ----------------------------------------
+  if (
+    // "how many units are in the store / on hand / in inventory"
+    /\bhow\s+many\s+(?:units?|bottles?|items?|cases?)\s+are\s+(?:in\s+(?:the\s+)?store|in\s+inventory|on\s+hand|currently\s+in\s+stock|currently)\b/.test(q) ||
+    // "how many units do we (currently) have"
+    /\bhow\s+many\s+(?:units?|bottles?|items?|cases?)\s+do\s+we\s+(?:currently\s+)?have\b/.test(q) ||
+    // "how many units do we have (in the store|on hand|in inventory)"
+    /\bhow\s+many\s+(?:units?|bottles?|items?|cases?)\s+do\s+we\s+have\s+(?:in\s+(?:the\s+)?store|in\s+inventory|on\s+hand)\b/.test(q) ||
+    /\bwhat\s+is\s+(?:our\s+)?total\s+on[- ]?hand\s+unit\s+count\b/.test(q) ||
+    // Filtered: "how many <color/varietal> units are in the store"
+    /\bhow\s+many\s+(?:white\s+wine|sparkling|gift|vendor|chardonnay|red\s+wine|rose|orange)\s+(?:units?|bottles?)\s+are\s+in\s+the\s+store\b/.test(q)
+  ) {
+    return 'inventory_units_on_hand';
+  }
+
+  // ---- 0.7 Inventory counts (product / sku) -------------------------------
+  if (
+    /\bhow\s+many\s+(?:products?|items?|skus?|variants?)\s+(?:have|are|currently)/.test(q) ||
+    /\bhow\s+many\s+(?:white\s+wine|sparkling|gift|vendor|red\s+wine|rose|orange)\s+(?:wines?|products?|items?)\s+are\s+currently\s+in\s+stock\b/.test(q)
+  ) {
+    if (/out\s+of\s+stock\b|are\s+out\s+of\s+stock\b/.test(q)) return 'inventory_count_out_of_stock';
+    if (/low\s+stock\b|are\s+low\s+stock\b/.test(q)) return 'inventory_count_low_stock';
+    if (/fewer\s+than\s+\d+\s+units?\b|less\s+than\s+\d+\s+units?\b|more\s+than\s+\d+\s+units?\b|over\s+\d+\s+units?\b|under\s+\d+\s+units?\b/.test(q)) {
+      return 'inventory_count_threshold';
+    }
+    if (/in\s+stock|have\s+inventory|have\s+stock|currently\s+(?:in\s+stock|have)/.test(q)) {
+      return 'inventory_count_in_stock';
+    }
+  }
+
+  // ---- 0.8 Product detail search ("tell me about X") ----------------------
+  // Anchored verbs: tell/show/give + "the? (product )?details? (about|on|for|of)"
+  // OR bare "tell me about <X>" when no email is present (an email is a much
+  // stronger customer signal than a capitalized phrase).
+  if (
+    /\b(?:tell\s+me|show\s+me|give\s+me)\s+(?:the\s+)?(?:full\s+)?(?:product\s+)?details?\s+(?:about|on|for|of)\s+\S/.test(q) ||
+    (/\btell\s+me\s+about\s+\S/.test(q) && !ent.email)
+  ) {
+    return 'product_detail_search';
+  }
+
   // ---- A. Single-customer questions (only valid if we have a name/email) --
   const haveCustomer = Boolean(ent.customer || ent.email);
   if (haveCustomer) {
+    // How many units/items/bottles/cases has X bought  → customer_units_bought
+    if (/how\s+many\s+(?:units?|bottles?|items?|cases?)\s+(?:has|have|did)\s+.+\s+(?:bought|buy|purchased|purchase|ordered|order)/.test(q)) {
+      return 'customer_units_bought';
+    }
     // What did <name> buy ...  (recent purchases). Includes "last thing X bought"
     // and "what were X's last N purchases/orders".
     if (
@@ -114,7 +208,7 @@ function classifyIntent(qRaw, ent = {}) {
     if (/average\s+order|aov|avg\s+order/.test(q)) {
       return 'customer_aov';
     }
-    if (/(spend|spent|spend\s+with\s+us|how\s+much\s+(?:did|has)|revenue\s+(?:from|came\s+from)|total\s+(?:spend|sales|revenue))/.test(q)) {
+    if (/(spend|spent|spend\s+with\s+us|how\s+much\s+(?:did|has|have)|revenue\s+(?:from|came\s+from)|total\s+(?:spend|sales|revenue))/.test(q)) {
       return 'customer_spend';
     }
     if (/profile\s+of|customer\s+profile|who\s+is\b|tell\s+me\s+about/.test(q)) {
@@ -295,7 +389,15 @@ function classifyIntent(qRaw, ent = {}) {
     /how\s+many\s+(?:units?|items?|bottles?|cases?)\s+did\s+we\s+sell/.test(q) ||
     /how\s+many\s+orders?\s+did\s+we\s+(?:have|get|receive)/.test(q) ||
     /what\s+was\s+(?:our\s+)?average\s+order\s+value/.test(q) ||
-    /\baverage\s+order\s+value\b/.test(q)
+    /\baverage\s+order\s+value\b/.test(q) ||
+    // Grouped phrasings — these don't always look like a "sales question"
+    // unless we explicitly catch them here. Promotion to sales_time_series
+    // happens later in parse() when timeframe.seriesGrain is set.
+    /\b(?:show\s+me\s+|show\s+)?(?:total\s+)?(?:orders|sales|revenue|units)\s+by\s+(?:day|week|month)\b/.test(q) ||
+    /\bdaily\s+(?:orders?|order\s+count|sales|revenue|units?)\b/.test(q) ||
+    /\bweekly\s+(?:orders?|order\s+count|sales|revenue|units?)\b/.test(q) ||
+    /\bmonthly\s+(?:orders?|order\s+count|sales|revenue|units?)\b/.test(q) ||
+    /\b(?:orders|sales|revenue|units|aov|average\s+order\s+value)\s+by\s+(?:day|week|month)\b/.test(q)
   ) {
     return 'sales_summary';
   }
@@ -312,7 +414,13 @@ function classifyIntent(qRaw, ent = {}) {
 // ---------------------------------------------------------------------------
 
 function deriveScope(intent, ent) {
-  if (intent === 'sales_summary' || intent === 'period_over_period' || intent === 'recent_orders') return 'storewide';
+  if (intent === 'sales_summary' || intent === 'sales_time_series' ||
+      intent === 'period_over_period' || intent === 'recent_orders') return 'storewide';
+  if (intent && intent.startsWith('data_coverage')) return 'meta';
+  if (intent && intent.startsWith('inventory_value')) return 'inventory';
+  if (intent && intent.startsWith('inventory_count')) return 'inventory';
+  if (intent === 'inventory_units_on_hand') return 'inventory';
+  if (intent === 'product_detail_search') return 'product';
   if (intent && intent.startsWith('customer')) return 'customer';
   if (intent && intent.startsWith('top_customers')) return 'customer';
   if (intent === 'customers_who_bought' || intent === 'customers_bought_both' ||
@@ -341,7 +449,7 @@ function parse(questionRaw, { now } = {}) {
   const q = question.toLowerCase();
   const ent = entities.extract(question);
   const tf = temporal.parse(question, now ? { now } : undefined);
-  const intent = classifyIntent(question, ent);
+  let intent = classifyIntent(question, ent);
 
   // Inventory-style explicit day counts override the temporal window for
   // dead_inventory / slow_moving.
@@ -349,6 +457,21 @@ function parse(questionRaw, { now } = {}) {
   const slow = extractSlowMoving(q);
   const lapsedDays = extractLapsedDays(q);
   const twoVarietals = extractTwoVarietals(q);
+
+  // Time-series escalation: if the classifier landed on a summary-shaped
+  // storewide intent AND the temporal parser detected a series grain
+  // (each day / by day / weekly / ...) promote the intent to a grouped
+  // version. We escalate sales_summary AND units_sold_per_sku because both
+  // are common landing points for grouped-time questions.
+  if (tf && tf.seriesGrain && (intent === 'sales_summary' || intent === 'units_sold_per_sku' || intent === 'recent_orders')) {
+    intent = 'sales_time_series';
+  }
+
+  // Surface the invalid_date temporal error as a help/error intent so the
+  // engine can show a clean message.
+  if (tf && tf.error === 'invalid_date') {
+    intent = 'invalid_date';
+  }
 
   const params = {
     rawQuestion: question,
@@ -358,6 +481,7 @@ function parse(questionRaw, { now } = {}) {
     slow: slow || null,
     lapsedDays: lapsedDays || null,
     twoVarietals: twoVarietals || null,
+    grain: tf && tf.seriesGrain ? tf.seriesGrain : null,
     limit: ent.limit,
     metric: ent.metric,
     color: ent.color,

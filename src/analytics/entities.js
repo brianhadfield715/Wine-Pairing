@@ -71,27 +71,96 @@ function extractEmail(raw) {
   return m ? m[0] : null;
 }
 
+// Trim trailing helper / timeframe / context fragments that managers append
+// to questions but that are NOT part of the customer name.
+const NAME_TAIL_TRIM = [
+  /\s+with\s+us\b.*$/i,
+  /\s+all[- ]?time\b.*$/i,
+  /\s+lifetime\b.*$/i,
+  /\s+ever\b.*$/i,
+  /\s+(?:in|over|since|after|before)\s+(?:the\s+)?\d.*$/i,
+  /\s+(?:in|over)\s+(?:the\s+)?(?:last|past)\s+\d+\s+(?:days?|weeks?|months?|years?)\b.*$/i,
+  /\s+(?:last|past|this|next)\s+(?:week|month|quarter|year|day)\b.*$/i,
+  /\s+(?:today|yesterday|tomorrow)\b.*$/i,
+  /\s+(?:year[- ]to[- ]date|ytd|month[- ]to[- ]date|mtd|quarter[- ]to[- ]date|qtd)\b.*$/i,
+  /[?.!,;:]+$/,
+];
+
+function trimNameTail(s) {
+  let v = String(s || '');
+  for (const re of NAME_TAIL_TRIM) v = v.replace(re, '');
+  return v.replace(/\s+/g, ' ').trim();
+}
+
+// Phrase-anchored extractors. These run case-INSENSITIVELY so we can pull
+// "brian hadfield" out of "how much has brian hadfield spent". The capture
+// group stops at common helper/temporal words via a non-greedy match plus
+// the NAME_TAIL_TRIM pass.
+const PHRASE_PATTERNS = [
+  // "how much (did|has|have|do|does) <name> (spent|spend|spending|spends|owe|owed)..."
+  /how\s+much\s+(?:did|has|have|do|does)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:spend|spent|spending|spends|owe|owed)/i,
+  // "what (has|did) <name> (spent|spend|spending|bought|buy|order|ordered|purchased|purchase)..."
+  /what\s+(?:has|did|have)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:spent|spend|spending|bought|buy|order|ordered|purchased|purchase)/i,
+  // "how many (units|bottles|items|cases|orders) (has|did|have) <name> (bought|buy|placed|ordered|order)..."
+  /how\s+many\s+(?:units?|bottles?|items?|cases?|orders?)\s+(?:has|did|have)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:bought|buy|placed|ordered|order|purchased)/i,
+  // "when did <name> last (shop|order|buy|purchase|visit)..."
+  /when\s+(?:did|was)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:last|most\s+recently)\s+(?:shop|order|buy|purchase|visit)/i,
+  // "what did <name> (buy|order|purchase|spend) ..."
+  /what\s+did\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:buy|bought|order|ordered|purchase|purchased|spend|spent)/i,
+  // "is <name> still active"
+  /is\s+([a-z][a-z .'’\-]{1,60}?)\s+still\s+active/i,
+  // possessive: "<name>'s recent purchases / favorite / average order value"
+  /([a-z][a-z .'’\-]{1,60}?)['’]s\s+(?:recent|favorite|favourite|average|last|last\s+\d+|order|spend|spending|profile|customer\s+profile)/i,
+  // "(show me )?(customer profile|profile) for/of <name>" — must explicitly
+  // mention customer/profile to avoid eating product hints like "show me
+  // details about olive brine".
+  /(?:show\s+me\s+the\s+|the\s+)?(?:customer\s+profile|profile)\s+(?:for|of)\s+([a-z][a-z .'’\-]{1,60}?)(?:[?.!,;:]|$)/i,
+];
+
 function extractCustomerHint(raw) {
   if (!raw) return null;
+  const text = String(raw);
 
-  // 1) Explicit "for/about/by Foo Bar" or possessive "Foo Bar's"
-  const explicit = raw.match(/(?:for|about|by)\s+([A-Z][a-zA-Z'’\-]+(?:\s+[A-Z][a-zA-Z'’\-]+){0,3})/);
-  if (explicit && looksLikeName(cleanCustomerCandidate(explicit[1]))) {
-    return cleanCustomerCandidate(explicit[1]);
-  }
-  const possessive = raw.match(/([A-Z][a-zA-Z'’\-]+(?:\s+[A-Z][a-zA-Z'’\-]+){0,3})['’]s\b/);
-  if (possessive && looksLikeName(cleanCustomerCandidate(possessive[1]))) {
-    return cleanCustomerCandidate(possessive[1]);
+  // 1) Phrase-anchored captures (case-insensitive). Try each in order; the
+  //    captured fragment is run through trimNameTail() to drop trailing
+  //    timeframe/helper phrases.
+  for (const re of PHRASE_PATTERNS) {
+    const m = text.match(re);
+    if (!m) continue;
+    let candidate = trimNameTail(m[1]);
+    // The candidate must look like a name (2-5 words, each alpha-ish) but
+    // case-insensitively this time.
+    if (looksLikeNameCI(candidate)) return normalizeName(candidate);
   }
 
-  // 2) Any 2-5 word capitalized run that passes looksLikeName.
-  const candidates = tokensFromCapWords(raw)
+  // 2) Capitalized-run fallback (legacy heuristic).
+  const candidates = tokensFromCapWords(text)
     .map(cleanCustomerCandidate)
     .filter(looksLikeName);
-
-  // Prefer the longest run (more specific).
   candidates.sort((a, b) => b.split(/\s+/).length - a.split(/\s+/).length);
   return candidates[0] || null;
+}
+
+// Case-insensitive variant of looksLikeName: 2-5 alpha tokens, no stopwords.
+function looksLikeNameCI(s) {
+  if (!s) return false;
+  const parts = s.trim().split(/\s+/);
+  if (parts.length < 2 || parts.length > 5) return false;
+  for (const w of parts) {
+    if (NAME_STOPWORDS.has(w.toLowerCase())) return false;
+    if (!/^[a-zA-Z][a-zA-Z'’\-]{1,}$/.test(w)) return false;
+  }
+  return true;
+}
+
+// Title-case for display, but the resolver matches case-insensitively so
+// this is purely cosmetic.
+function normalizeName(s) {
+  return s
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
 }
 
 function extractColor(q) {
@@ -195,21 +264,45 @@ function extractCategory(q) {
   return null;
 }
 
-// "what is commonly bought with <product hint>" / "for <product>"
+// Pulls a free-text product hint from common phrasings:
+//   "commonly bought with <X>"
+//   "what is sold with <X>"
+//   "tell/show/give me the details (about|on|for|of) <X>"
+//   "details for SKU <X>"  (the SKU side is already extracted separately)
+//   "tell me about <X>" — broad fallback when no email present
 function extractProductHint(raw) {
   if (!raw) return null;
   const q = String(raw);
-  // Lookbehind for "with " or "alongside " or "for " followed by a
-  // capitalized product-ish run OR a varietal/term.
-  const after = q.match(/\b(?:bought|sold|paired|purchased|together)\s+with\s+([A-Za-z][A-Za-z0-9 '’\-]{2,40})/i)
-              || q.match(/\bwith\s+([A-Z][A-Za-z0-9 '’\-]{2,40})/);
-  if (after) {
-    let v = after[1].replace(/[?.!,]+$/g, '').trim();
-    // Trim trailing temporal phrases that snuck into the capture.
-    v = v.replace(/\s+(?:today|yesterday|this|last|past|all)\b.*$/i, '').trim();
-    if (v.length >= 3) return v;
-  }
+
+  // 1) "bought/sold/paired/purchased/together with <hint>"
+  let m = q.match(/\b(?:bought|sold|paired|purchased|together)\s+with\s+([A-Za-z][A-Za-z0-9 '’\-]{2,60})/i);
+  if (m) return trimProductHint(m[1]);
+
+  // 2) "(tell|show|give) (me )?(the )?(full )?(product )?details? (about|on|for|of) <hint>"
+  m = q.match(/\b(?:tell|show|give)\s+(?:me\s+)?(?:the\s+)?(?:full\s+)?(?:product\s+)?details?\s+(?:about|on|for|of)\s+(.+?)$/i);
+  if (m) return trimProductHint(m[1]);
+
+  // 3) "tell me about <hint>" (broad)
+  m = q.match(/\btell\s+me\s+about\s+(.+?)$/i);
+  if (m) return trimProductHint(m[1]);
+
+  // 4) capitalized after bare "with " (existing behavior)
+  m = q.match(/\bwith\s+([A-Z][A-Za-z0-9 '’\-]{2,40})/);
+  if (m) return trimProductHint(m[1]);
+
   return null;
+}
+
+function trimProductHint(s) {
+  let v = String(s || '').trim();
+  // Strip the leading "SKU XXX" form — SKUs are handled by extractSku.
+  v = v.replace(/^sku\s+/i, '');
+  // Trim trailing punctuation.
+  v = v.replace(/[?.!,;:]+$/g, '').trim();
+  // Trim trailing temporal helper phrases that snuck into the capture.
+  v = v.replace(/\s+(?:today|yesterday|this|last|past|all|in|over|since|after|before|with\s+us)\b.*$/i, '').trim();
+  if (v.length < 3) return null;
+  return v;
 }
 
 /**
@@ -252,5 +345,8 @@ module.exports = {
   extractMetric,
   extractProductHint,
   looksLikeName,
+  looksLikeNameCI,
+  normalizeName,
+  trimNameTail,
   VARIETALS,
 };

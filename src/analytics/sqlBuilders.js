@@ -1269,6 +1269,370 @@ function vendorDecline(p) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Time-series builders (grain = day / week / month)
+// ---------------------------------------------------------------------------
+
+function grainToTrunc(grain) {
+  return { day: 'day', week: 'week', month: 'month' }[grain] || 'day';
+}
+
+function salesTimeSeries(p) {
+  // Default window: last week when nothing else parsed.
+  const grain = grainToTrunc(p.grain || (p.timeframe && p.timeframe.seriesGrain) || 'day');
+  let tf = p.timeframe;
+  if (!tf || tf.mode === 'all_time') {
+    const now = new Date();
+    tf = {
+      mode: 'window',
+      sinceIso: new Date(now - 7 * 86400e3).toISOString(),
+      untilIso: now.toISOString(),
+      label: 'last 7 days (default)',
+      days: 7,
+    };
+  }
+  const w = windowFragments('occurred_at', tf, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      date_trunc('${grain}', occurred_at)             as bucket,
+      count(distinct order_id)::int                   as orders,
+      coalesce(sum(quantity), 0)::int                 as units,
+      coalesce(sum(net_revenue), 0)::numeric(14,2)    as net_revenue,
+      case when count(distinct order_id) > 0
+           then (sum(net_revenue) / count(distinct order_id))::numeric(14,2)
+           else 0 end                                  as average_order_value
+      from fact_sales
+     ${where}
+     group by bucket
+     order by bucket asc
+  `;
+  return { text, values: w.values, meta: { domain: 'revenue', grain, timeframe: tf } };
+}
+
+// ---------------------------------------------------------------------------
+// Customer units bought (lifetime or windowed quantity)
+// ---------------------------------------------------------------------------
+
+function customerUnitsBought(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) {
+    return { text: `select 0::int as units, 0::int as order_count`, values: [], meta: { domain: 'customers' } };
+  }
+  const w = windowFragments('fs.occurred_at', p.timeframe, 2);
+  const values = [cid, ...w.values];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      $1::bigint                                  as customer_id,
+      coalesce(sum(fs.quantity), 0)::int          as units,
+      count(distinct fs.order_id)::int            as order_count,
+      coalesce(sum(fs.net_revenue), 0)::numeric(14,2) as total_spend,
+      min(fs.occurred_at)                         as first_order_at,
+      max(fs.occurred_at)                         as last_order_at
+      from fact_sales fs
+     where fs.customer_id = $1 ${where}
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+// ---------------------------------------------------------------------------
+// Inventory value (retail). Cost-based value is not supported by the
+// currently-synced schema (variants/inventory_levels_current have no cost
+// column). Builders below say so explicitly via meta.has_cost_data: false.
+// ---------------------------------------------------------------------------
+
+function inventoryValueTotal(p) {
+  const filters = [`v.on_hand > 0`, `coalesce(v.product_status, 'active') = 'active'`];
+  const values = [];
+  let i = 1;
+  if (p.color) {
+    values.push(`%${p.color}%`);
+    filters.push(`(lower(v.product_type) like lower($${i}) or lower(v.product_title) like lower($${i}))`);
+    i++;
+  }
+  if (p.varietal) {
+    values.push(`%${p.varietal}%`);
+    filters.push(`lower(v.product_title) like lower($${i++})`);
+  }
+  if (p.vendor) {
+    values.push(`%${p.vendor}%`);
+    filters.push(`lower(v.vendor) like lower($${i++})`);
+  }
+  if (p.category) {
+    values.push(`%${p.category}%`);
+    filters.push(`(lower(v.product_type) like lower($${i}) or lower(v.product_title) like lower($${i}))`);
+    i++;
+  }
+  const where = `where ${filters.join(' and ')}`;
+  const text = `
+    select
+      coalesce(sum(v.on_hand * v.price), 0)::numeric(14,2) as retail_value,
+      coalesce(sum(v.on_hand), 0)::int                     as on_hand_units,
+      count(*)::int                                        as sku_count
+      from vw_current_inventory v
+     ${where}
+  `;
+  return { text, values, meta: { domain: 'inventory', valuation: 'retail', has_cost_data: false } };
+}
+
+function inventoryValueByVendor(p) {
+  const filters = [`v.on_hand > 0`, `coalesce(v.product_status, 'active') = 'active'`];
+  const values = [];
+  let i = 1;
+  if (p.color) {
+    values.push(`%${p.color}%`);
+    filters.push(`lower(v.product_title) like lower($${i++})`);
+  }
+  values.push(p.limit || 25);
+  const where = `where ${filters.join(' and ')}`;
+  const text = `
+    select coalesce(nullif(v.vendor,''), '(unknown)') as vendor,
+           coalesce(sum(v.on_hand * v.price), 0)::numeric(14,2) as retail_value,
+           coalesce(sum(v.on_hand), 0)::int          as on_hand_units,
+           count(*)::int                              as sku_count
+      from vw_current_inventory v
+     ${where}
+     group by 1
+     order by retail_value desc nulls last
+     limit $${i}
+  `;
+  return { text, values, meta: { domain: 'inventory', valuation: 'retail', has_cost_data: false } };
+}
+
+function inventoryValueByCategory(p) {
+  const text = `
+    select coalesce(nullif(v.product_type,''), '(unknown)') as category,
+           coalesce(sum(v.on_hand * v.price), 0)::numeric(14,2) as retail_value,
+           coalesce(sum(v.on_hand), 0)::int                     as on_hand_units,
+           count(*)::int                                         as sku_count
+      from vw_current_inventory v
+     where v.on_hand > 0
+       and coalesce(v.product_status, 'active') = 'active'
+     group by 1
+     order by retail_value desc nulls last
+     limit $1
+  `;
+  return { text, values: [p.limit || 25], meta: { domain: 'inventory', valuation: 'retail', has_cost_data: false } };
+}
+
+function inventoryValueDead(p) {
+  const days = p.dayCount || (p.timeframe && p.timeframe.days) || 90;
+  const text = `
+    select
+      coalesce(sum(d.on_hand * v.price), 0)::numeric(14,2) as retail_value,
+      coalesce(sum(d.on_hand), 0)::int                      as on_hand_units,
+      count(*)::int                                          as sku_count
+      from dim_sku_profile d
+      join vw_current_inventory v on v.sku = d.sku
+     where d.on_hand > 0
+       and (d.last_sold_at is null or d.last_sold_at < now() - ($1 || ' days')::interval)
+  `;
+  return { text, values: [String(days)], meta: { domain: 'inventory', valuation: 'retail', has_cost_data: false, days } };
+}
+
+function inventoryValueLowStock(p) {
+  const threshold = (p.unitsBelow && p.unitsBelow.value) || (p.money && p.money.value) || 6;
+  const text = `
+    select
+      coalesce(sum(v.on_hand * v.price), 0)::numeric(14,2) as retail_value,
+      coalesce(sum(v.on_hand), 0)::int                     as on_hand_units,
+      count(*)::int                                        as sku_count
+      from vw_current_inventory v
+     where v.on_hand > 0
+       and v.on_hand <= $1
+       and coalesce(v.product_status, 'active') = 'active'
+  `;
+  return { text, values: [threshold], meta: { domain: 'inventory', valuation: 'retail', has_cost_data: false, threshold } };
+}
+
+// ---------------------------------------------------------------------------
+// Inventory counts (distinct product/sku counts)
+// ---------------------------------------------------------------------------
+
+function inventoryCountInStock(p) {
+  const filters = [`v.on_hand > 0`, `coalesce(v.product_status, 'active') = 'active'`];
+  const values = [];
+  let i = 1;
+  if (p.color) {
+    values.push(`%${p.color}%`);
+    filters.push(`(lower(v.product_type) like lower($${i}) or lower(v.product_title) like lower($${i}))`);
+    i++;
+  }
+  if (p.varietal) {
+    values.push(`%${p.varietal}%`);
+    filters.push(`lower(v.product_title) like lower($${i++})`);
+  }
+  if (p.vendor) {
+    values.push(`%${p.vendor}%`);
+    filters.push(`lower(v.vendor) like lower($${i++})`);
+  }
+  if (p.category) {
+    values.push(`%${p.category}%`);
+    filters.push(`(lower(v.product_type) like lower($${i}) or lower(v.product_title) like lower($${i}))`);
+    i++;
+  }
+  const where = `where ${filters.join(' and ')}`;
+  const text = `
+    select
+      count(distinct v.product_id)::int as product_count,
+      count(*)::int                     as sku_count,
+      coalesce(sum(v.on_hand), 0)::int  as on_hand_units
+      from vw_current_inventory v
+     ${where}
+  `;
+  return { text, values, meta: { domain: 'inventory' } };
+}
+
+function inventoryCountOutOfStock() {
+  const text = `
+    select
+      count(distinct v.product_id)::int as product_count,
+      count(*)::int                     as sku_count
+      from vw_current_inventory v
+     where v.on_hand <= 0
+       and coalesce(v.product_status, 'active') = 'active'
+  `;
+  return { text, values: [], meta: { domain: 'inventory' } };
+}
+
+function inventoryCountLowStock(p) {
+  const threshold = (p.unitsBelow && p.unitsBelow.value) || (p.money && p.money.value) || 6;
+  const text = `
+    select
+      count(distinct v.product_id)::int as product_count,
+      count(*)::int                     as sku_count,
+      $1::int                           as threshold
+      from vw_current_inventory v
+     where v.on_hand > 0
+       and v.on_hand <= $1
+       and coalesce(v.product_status, 'active') = 'active'
+  `;
+  return { text, values: [threshold], meta: { domain: 'inventory' } };
+}
+
+function inventoryCountThreshold(p) {
+  // "more than N" / "fewer than N" / "between A and B".
+  const m = p.money || p.unitsBelow;
+  if (!m) {
+    return inventoryCountInStock(p);
+  }
+  let cond;
+  const values = [];
+  if (m.op === '<')      { cond = `v.on_hand < $1`;             values.push(m.value); }
+  else if (m.op === '>') { cond = `v.on_hand > $1`;             values.push(m.value); }
+  else if (m.op === 'between') { cond = `v.on_hand between $1 and $2`; values.push(m.min, m.max); }
+  else                   { cond = `v.on_hand > 0`; }
+  const text = `
+    select
+      count(distinct v.product_id)::int as product_count,
+      count(*)::int                     as sku_count
+      from vw_current_inventory v
+     where coalesce(v.product_status, 'active') = 'active'
+       and ${cond}
+  `;
+  return { text, values, meta: { domain: 'inventory', condition: m } };
+}
+
+function inventoryUnitsOnHand(p) {
+  const filters = [`v.on_hand > 0`, `coalesce(v.product_status, 'active') = 'active'`];
+  const values = [];
+  let i = 1;
+  if (p.color) {
+    values.push(`%${p.color}%`);
+    filters.push(`(lower(v.product_type) like lower($${i}) or lower(v.product_title) like lower($${i}))`);
+    i++;
+  }
+  if (p.varietal) {
+    values.push(`%${p.varietal}%`);
+    filters.push(`lower(v.product_title) like lower($${i++})`);
+  }
+  if (p.vendor) {
+    values.push(`%${p.vendor}%`);
+    filters.push(`lower(v.vendor) like lower($${i++})`);
+  }
+  if (p.category) {
+    values.push(`%${p.category}%`);
+    filters.push(`(lower(v.product_type) like lower($${i}) or lower(v.product_title) like lower($${i}))`);
+    i++;
+  }
+  const where = `where ${filters.join(' and ')}`;
+  const text = `
+    select
+      coalesce(sum(v.on_hand), 0)::int  as on_hand_units,
+      count(distinct v.product_id)::int as product_count,
+      count(*)::int                     as sku_count
+      from vw_current_inventory v
+     ${where}
+  `;
+  return { text, values, meta: { domain: 'inventory' } };
+}
+
+// ---------------------------------------------------------------------------
+// Data coverage / metadata
+// ---------------------------------------------------------------------------
+
+function dataCoverageOrders() {
+  const text = `
+    select
+      min(coalesce(processed_at, created_at)) as earliest_order_at,
+      max(coalesce(processed_at, created_at)) as latest_order_at,
+      count(*)::int                            as total_orders,
+      count(*) filter (where cancelled_at is null)::int as active_orders
+      from orders
+  `;
+  return { text, values: [], meta: { domain: 'meta', resource: 'orders' } };
+}
+
+function dataCoverageCustomers() {
+  const text = `
+    select
+      count(*)::int                                         as total_customers,
+      count(*) filter (where orders_count > 0)::int         as customers_with_orders,
+      min(created_at)                                       as earliest_customer_at,
+      max(created_at)                                       as latest_customer_at
+      from customers
+  `;
+  return { text, values: [], meta: { domain: 'meta', resource: 'customers' } };
+}
+
+function dataCoverageProducts() {
+  const text = `
+    select
+      (select count(*) from products)                                as total_products,
+      (select count(*) from products where status = 'active')        as active_products,
+      (select count(*) from variants)                                as total_variants,
+      (select count(distinct product_id) from vw_current_inventory
+        where on_hand > 0)                                           as products_in_stock
+  `;
+  return { text, values: [], meta: { domain: 'meta', resource: 'products' } };
+}
+
+function dataCoverageAll() {
+  // One row combining the three resources.
+  const text = `
+    select
+      (select min(coalesce(processed_at, created_at)) from orders) as earliest_order_at,
+      (select max(coalesce(processed_at, created_at)) from orders) as latest_order_at,
+      (select count(*) from orders)::int                            as total_orders,
+      (select count(*) from customers)::int                         as total_customers,
+      (select count(*) from products)::int                          as total_products,
+      (select count(*) from variants)::int                          as total_variants,
+      (select count(distinct product_id) from vw_current_inventory where on_hand > 0)::int as products_in_stock
+  `;
+  return { text, values: [], meta: { domain: 'meta', resource: 'all' } };
+}
+
+// ---------------------------------------------------------------------------
+// Product detail search — when the user gives a fuzzy hint and we already
+// resolved it via resolver.resolveProductByHint, the engine attaches the
+// candidate(s) to plan.resolved.product. If resolved.product is a single
+// row we re-use productDetail() so the answer is unified.
+// ---------------------------------------------------------------------------
+function productDetailSearch(p) {
+  return productDetail(p);
+}
+
 module.exports = {
   // customers
   topCustomersBySpend,
@@ -1327,4 +1691,27 @@ module.exports = {
   sellThrough,
   lowStockHighVelocity,
   slowMoving,
+  // time-series
+  salesTimeSeries,
+  // customer units bought
+  customerUnitsBought,
+  // inventory value
+  inventoryValueTotal,
+  inventoryValueByVendor,
+  inventoryValueByCategory,
+  inventoryValueDead,
+  inventoryValueLowStock,
+  // inventory counts
+  inventoryCountInStock,
+  inventoryCountOutOfStock,
+  inventoryCountLowStock,
+  inventoryCountThreshold,
+  inventoryUnitsOnHand,
+  // data coverage
+  dataCoverageOrders,
+  dataCoverageCustomers,
+  dataCoverageProducts,
+  dataCoverageAll,
+  // product detail search wrapper
+  productDetailSearch,
 };

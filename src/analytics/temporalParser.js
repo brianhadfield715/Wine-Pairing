@@ -280,6 +280,81 @@ function tryBetween(q) {
   return { mode: 'window', sinceIso: s.toISOString(), untilIso: e.toISOString(), label: `between ${m[1]} and ${m[2]}` };
 }
 
+// ---- Exact single calendar dates ----------------------------------------
+// Supported forms:
+//   1/25/2026   01/25/2026   1/25/26          (M/D/Y, US convention)
+//   2026-01-25                                (ISO)
+//   Jan 25 2026   January 25, 2026            (named-month)
+//
+// All become mode='exact_date' with sinceIso=start-of-day and
+// untilIso=start-of-next-day. label is a human-friendly form.
+// Returns { error: 'invalid_date', label } when the literal is malformed
+// (e.g. month > 12) so the engine can surface a clean help message.
+const MONTH_NAMES_FULL = MONTHS;
+const MONTH_NAMES_SHORT = MONTHS.map((m) => m.slice(0, 3));
+
+function buildExactDate(year, monthIdx, day, originalLabel) {
+  // Validate: monthIdx 0..11, day 1..31, plus actual day-validity per month.
+  if (!Number.isFinite(year) || !Number.isFinite(monthIdx) || !Number.isFinite(day)) {
+    return { error: 'invalid_date', mode: 'all_time', label: `invalid date "${originalLabel}"` };
+  }
+  if (monthIdx < 0 || monthIdx > 11 || day < 1 || day > 31) {
+    return { error: 'invalid_date', mode: 'all_time', label: `invalid date "${originalLabel}"` };
+  }
+  const start = new Date(Date.UTC(year, monthIdx, day));
+  if (
+    start.getUTCFullYear() !== year ||
+    start.getUTCMonth() !== monthIdx ||
+    start.getUTCDate() !== day
+  ) {
+    return { error: 'invalid_date', mode: 'all_time', label: `invalid date "${originalLabel}"` };
+  }
+  const end = addDays(start, 1);
+  const fmt = `${MONTH_NAMES_SHORT[monthIdx][0].toUpperCase() + MONTH_NAMES_SHORT[monthIdx].slice(1)} ${day}, ${year}`;
+  return {
+    mode: 'exact_date',
+    sinceIso: start.toISOString(),
+    untilIso: end.toISOString(),
+    label: fmt,
+    grain: 'day',
+    days: 1,
+  };
+}
+
+function tryExactDateNumeric(q) {
+  // "on 1/25/2026", "on 01/25/2026", "on 1/25/26"
+  // Also bare "1/25/2026" anywhere in the question (rarer but supported).
+  const m = q.match(/\b(?:on\s+)?(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})\b/);
+  if (!m) return null;
+  const month = parseInt(m[1], 10);
+  const day = parseInt(m[2], 10);
+  let year = parseInt(m[3], 10);
+  if (year < 100) year += 2000;
+  return buildExactDate(year, month - 1, day, m[0]);
+}
+
+function tryExactDateIso(q) {
+  // "on 2026-01-25" or bare "2026-01-25". This intentionally does NOT
+  // collide with "between A and B" because that handler runs earlier.
+  const m = q.match(/\b(?:on\s+)?(\d{4})-(\d{2})-(\d{2})\b/);
+  if (!m) return null;
+  return buildExactDate(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10), m[0]);
+}
+
+function tryExactDateNamed(q) {
+  // "Jan 25 2026", "January 25, 2026", "on Jan 25 2026"
+  const re = new RegExp(
+    `\\b(?:on\\s+)?(${[...MONTH_NAMES_FULL, ...MONTH_NAMES_SHORT].join('|')})\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})\\b`,
+    'i'
+  );
+  const m = q.match(re);
+  if (!m) return null;
+  const monthLower = m[1].toLowerCase();
+  let monthIdx = MONTH_NAMES_FULL.indexOf(monthLower);
+  if (monthIdx === -1) monthIdx = MONTH_NAMES_SHORT.indexOf(monthLower);
+  return buildExactDate(parseInt(m[3], 10), monthIdx, parseInt(m[2], 10), m[0]);
+}
+
 function trySince(q) {
   const m = q.match(/\b(?:since|after)\s+(\d{4}-\d{2}-\d{2})\b/);
   if (!m) return null;
@@ -299,8 +374,11 @@ function tryBefore(q) {
 // ---------------------------------------------------------------------------
 
 const HANDLERS = [
-  tryAllTime,         // very explicit "all time" / "lifetime"
+  tryAllTime,             // very explicit "all time" / "lifetime"
   tryBetween, trySince, tryBefore,
+  // Exact-date literals must run BEFORE the rolling / named-month handlers
+  // so "1/25/2026" wins over a generic "yesterday" or "in May".
+  tryExactDateNumeric, tryExactDateIso, tryExactDateNamed,
   tryRollingDays, tryRollingMonths, tryRollingWeeks,
   tryToday, tryYesterday,
   tryThisWeek, tryLastWeek,
@@ -311,6 +389,14 @@ const HANDLERS = [
   tryOnDayOfWeek, tryWeekend,
 ];
 
+// Time-series grain detector. Returns one of 'day' | 'week' | 'month' | null.
+function detectSeriesGrain(qLower) {
+  if (/\b(?:each|by|per)\s+day\b|\bdaily\b/.test(qLower)) return 'day';
+  if (/\b(?:each|by|per)\s+week\b|\bweekly\b/.test(qLower)) return 'week';
+  if (/\b(?:each|by|per)\s+month\b|\bmonthly\b/.test(qLower)) return 'month';
+  return null;
+}
+
 /**
  * Parse a question and return its temporal window. If no temporal phrase is
  * detected, returns { mode:'all_time', label:'all time' } so the caller can
@@ -320,11 +406,16 @@ const HANDLERS = [
  */
 function parse(questionRaw, { now = new Date() } = {}) {
   const q = String(questionRaw || '').toLowerCase();
+  let result = null;
   for (const fn of HANDLERS) {
     const r = fn(q, now);
-    if (r) return r;
+    if (r) { result = r; break; }
   }
-  return { mode: 'all_time', label: 'all time' };
+  if (!result) result = { mode: 'all_time', label: 'all time' };
+  // Tag time-series grain on top of whatever window was matched.
+  const seriesGrain = detectSeriesGrain(q);
+  if (seriesGrain) result.seriesGrain = seriesGrain;
+  return result;
 }
 
 /**
@@ -346,4 +437,4 @@ function withDefault(parsed, defaultDays) {
   };
 }
 
-module.exports = { parse, withDefault };
+module.exports = { parse, withDefault, detectSeriesGrain };

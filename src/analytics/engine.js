@@ -69,6 +69,19 @@ async function answer(question) {
     resolved: {},
   };
 
+  // Special-case: temporal parser flagged an invalid explicit date literal.
+  if (parsed.intent === 'invalid_date') {
+    const label = parsed.params.timeframe && parsed.params.timeframe.label;
+    return {
+      question,
+      intent: 'invalid_date',
+      domain: 'meta',
+      answer: `That date doesn't look valid${label ? ` (${label})` : ''}. Try MM/DD/YYYY, YYYY-MM-DD, or a named-month form like "January 25, 2026".`,
+      data: [],
+      meta: { status: 'error', error: 'invalid_date', timeframe: parsed.params.timeframe || null },
+    };
+  }
+
   if (!entry) {
     return helpResponse(question, 'general_help');
   }
@@ -109,6 +122,51 @@ async function answer(question) {
         intent: parsed.intent,
         domain: entry.domain,
         answer: `Customer lookup failed: ${e.message}`,
+        data: [],
+        meta: { status: 'error', error: e.message },
+      };
+    }
+  }
+
+  if (entry.needsProductSearch) {
+    // Stronger product resolution: tries SKU, exact title, starts-with,
+    // contains; returns disambiguation candidates with enough detail to
+    // pick (SKU / vendor / inventory / price).
+    try {
+      const r = await resolver.resolveProductByHint({
+        productHint: parsed.params.productHint,
+        sku: parsed.params.sku,
+      });
+      if (r.status === 'ambiguous') {
+        const lines = r.candidates.map((c, i) =>
+          `${i + 1}. ${c.product_title}${c.primary_sku ? ' · ' + c.primary_sku : ''}${c.vendor ? ' · ' + c.vendor : ''}${c.on_hand_total != null ? ' · on hand ' + c.on_hand_total : ''}${c.min_price ? ' · $' + Number(c.min_price).toFixed(2) : ''}`
+        );
+        return {
+          question,
+          intent: parsed.intent,
+          domain: entry.domain,
+          answer: `Multiple products match "${r.hint}":\n${lines.join('\n')}`,
+          data: r.candidates,
+          meta: { status: 'disambiguation', resolution: { product: r } },
+        };
+      }
+      if (r.status === 'not_found') {
+        return {
+          question,
+          intent: parsed.intent,
+          domain: entry.domain,
+          answer: `No product found matching "${parsed.params.productHint || parsed.params.sku || '(none)'}".`,
+          data: [],
+          meta: { status: 'not_found', resolution: { product: r } },
+        };
+      }
+      plan.resolved.product = r.product;
+    } catch (e) {
+      return {
+        question,
+        intent: parsed.intent,
+        domain: entry.domain,
+        answer: `Product lookup failed: ${e.message}`,
         data: [],
         meta: { status: 'error', error: e.message },
       };

@@ -36,9 +36,35 @@ async function rawFetch(url, init = {}) {
     'Content-Type': 'application/json',
     ...(init.headers || {}),
   };
-  const maxAttempts = 5;
+  const maxAttempts = Number(
+    init.maxAttempts || process.env.SHOPIFY_HTTP_MAX_ATTEMPTS || 5
+  );
+  const timeoutMs = Number(
+    init.timeoutMs || process.env.SHOPIFY_HTTP_TIMEOUT_MS || 25_000
+  );
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const res = await fetch(url, { ...init, headers });
+    // Per-attempt AbortController so a stalled connection cannot wedge the
+    // entire sync. node-fetch v2 honors `signal`.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(url, { ...init, headers, signal: controller.signal });
+    } catch (e) {
+      clearTimeout(timer);
+      const isAbort = e && (e.name === 'AbortError' || /abort/i.test(e.message || ''));
+      if (isAbort && attempt < maxAttempts) {
+        // treat as transient
+        await sleep(Math.min(5_000, 500 * attempt));
+        continue;
+      }
+      throw new Error(
+        isAbort
+          ? `shopify fetch timed out after ${timeoutMs}ms`
+          : `shopify fetch failed: ${e.message}`
+      );
+    }
+    clearTimeout(timer);
     if (res.status === 429 || res.status >= 500) {
       const retryAfter = parseFloat(res.headers.get('retry-after') || '1');
       const waitMs = Math.min(10_000, Math.max(500, retryAfter * 1000) * attempt);

@@ -433,6 +433,22 @@ function requireDb(req, res, next) {
   next();
 }
 
+// Lightweight request logger for admin sync routes: method, path, status,
+// elapsed_ms. Logged after response finishes to capture the real status.
+function adminRequestLogger(req, res, next) {
+  const t0 = Date.now();
+  res.on('finish', () => {
+    const elapsed_ms = Date.now() - t0;
+    // Structured-ish single line; cheap to parse from Render logs.
+    console.log(
+      `[admin] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${elapsed_ms}ms)`
+    );
+  });
+  next();
+}
+
+app.use('/admin', adminRequestLogger);
+
 app.post('/admin/sync/products', requireBasicAuth, requireDb, async (req, res) => {
   try { res.json({ ok: true, result: await syncProductsMod.syncProducts() }); }
   catch (e) { res.status(500).json({ error: e.message }); }
@@ -453,9 +469,91 @@ app.post('/admin/sync/customers', requireBasicAuth, requireDb, async (req, res) 
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// /admin/sync/orders  — reliable, observable, always responds with JSON.
+// Accepts: { days?, limit?, max?, maxPages?, sinceIso?, untilIso? }
+// Backwards compatible with the original { days: 1 } body shape.
 app.post('/admin/sync/orders', requireBasicAuth, requireDb, async (req, res) => {
-  try { res.json({ ok: true, result: await syncOrdersMod.syncOrders(req.body || {}) }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  const t0 = Date.now();
+  const body = req.body || {};
+  const daysIn = body.days != null ? Number(body.days) : null;
+
+  // Per-request log prefix lets us correlate page events in Render logs.
+  const tag = `[admin/sync/orders ${t0.toString(36)}]`;
+  const log = (event, payload) => {
+    try {
+      console.log(`${tag} ${event} ${JSON.stringify(payload)}`);
+    } catch {
+      console.log(`${tag} ${event} <unserializable>`);
+    }
+  };
+
+  log('request', {
+    days: daysIn,
+    limit: body.limit ?? null,
+    max: body.max ?? null,
+    maxPages: body.maxPages ?? null,
+    sinceIso: body.sinceIso ?? null,
+    untilIso: body.untilIso ?? null,
+  });
+
+  // Safety net: if the handler somehow takes too long, return JSON instead
+  // of letting the load balancer terminate silently. The underlying sync
+  // continues to log; we just stop blocking the HTTP response.
+  const handlerTimeoutMs = Number(
+    body.handlerTimeoutMs || process.env.ORDERS_SYNC_HANDLER_TIMEOUT_MS || 110_000
+  );
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    if (!res.headersSent) {
+      const elapsed_ms = Date.now() - t0;
+      log('handler_timeout', { handlerTimeoutMs, elapsed_ms });
+      res.status(504).json({
+        ok: false,
+        endpoint: 'orders',
+        days: daysIn,
+        error: `handler timed out after ${handlerTimeoutMs}ms (sync may still be running)`,
+        stage: 'fetch',
+        elapsed_ms,
+      });
+    }
+  }, handlerTimeoutMs);
+
+  try {
+    const result = await syncOrdersMod.syncOrders({ ...body, log });
+    if (timedOut || res.headersSent) return; // response already sent
+    clearTimeout(timer);
+    const elapsed_ms = Date.now() - t0;
+    res.json({
+      ok: true,
+      endpoint: 'orders',
+      days: daysIn,
+      chunks_processed: result.chunks_processed,
+      pages_fetched: result.pages_fetched,
+      orders_written: result.orders_written,
+      line_items_written: result.line_items_written,
+      orders_skipped: result.orders_skipped,
+      lines_skipped: result.lines_skipped,
+      cancelled_seen: result.cancelled_seen,
+      window: { sinceIso: result.sinceIso, untilIso: result.untilIso },
+      elapsed_ms,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    if (timedOut || res.headersSent) return;
+    const elapsed_ms = Date.now() - t0;
+    const stage = e && e.stage ? e.stage : 'unknown';
+    const message = (e && e.message) || String(e);
+    console.error(`${tag} ERROR stage=${stage} elapsed_ms=${elapsed_ms}`, e && e.stack ? e.stack : e);
+    res.status(500).json({
+      ok: false,
+      endpoint: 'orders',
+      days: daysIn,
+      error: message,
+      stage,
+      elapsed_ms,
+    });
+  }
 });
 
 app.post('/admin/sync/backfill', requireBasicAuth, requireDb, async (req, res) => {

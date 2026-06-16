@@ -13,6 +13,8 @@
     "sync:orders": "node -e \"require('./src/sync/orders').syncOrders({}).then(r=>console.log(JSON.stringify(r,null,2))).catch(e=>{console.error(e);process.exit(1)})\"",
     "sync:backfill": "node -e \"require('./src/sync/backfill').runBackfill({days:365}).then(r=>console.log(JSON.stringify(r,null,2))).catch(e=>{console.error(e);process.exit(1)})\"",
     "smoke": "node scripts/smoke.js",
+    "smoke:orders": "node scripts/smoke_orders_sync.js",
+    "smoke:basket": "node scripts/smoke_basket_live.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

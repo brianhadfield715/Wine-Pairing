@@ -45,6 +45,16 @@ const VISUAL_DEFAULTS = {
   period_over_period:       { chart_type: 'bar',   x_field: 'bucket', y_field: 'revenue' },
   lapsed_frequent_customers:{ chart_type: null /* table */, x_field: null, y_field: null },
   customer_reactivation_candidates: { chart_type: null /* table */, x_field: null, y_field: null },
+  // v5
+  customer_time_series:     { chart_type: 'line',  x_field: 'bucket',       y_field: 'net_revenue' },
+  customer_change_over_time:{ chart_type: 'bar',   x_field: 'bucket',       y_field: 'revenue' },
+  customer_color_mix:       { chart_type: 'pie',   x_field: 'color_bucket', y_field: 'spend' },
+  customer_comparison:      { chart_type: 'bar',   x_field: 'side',         y_field: 'total_spend' },
+  customer_last_order_items:{ chart_type: null /* table */, x_field: null, y_field: null },
+  customer_last_n_orders:   { chart_type: null /* table */, x_field: null, y_field: null },
+  order_detail_lookup:      { chart_type: null /* table */, x_field: null, y_field: null },
+  order_items_lookup:       { chart_type: null /* table */, x_field: null, y_field: null },
+  order_extreme_item_lookup:{ chart_type: null /* table */, x_field: null, y_field: null },
 };
 
 function intentDefault(intent) {
@@ -133,6 +143,15 @@ function titleFor(intent, plan) {
     period_over_period:           `Period over period`,
     lapsed_frequent_customers:    `Lapsed frequent customers`,
     customer_reactivation_candidates: `Reactivation candidates`,
+    customer_time_series:         `Customer activity by ${plan && plan.params && plan.params.grain || 'week'}${tl ? ' - ' + tl : ''}`,
+    customer_change_over_time:    `Customer change over time${tl ? ' - ' + tl : ''}`,
+    customer_color_mix:           `Customer color mix${tl ? ' - ' + tl : ''}`,
+    customer_comparison:          `Customer comparison${tl ? ' - ' + tl : ''}`,
+    customer_last_order_items:    `Customer last order`,
+    customer_last_n_orders:       `Customer recent orders`,
+    order_detail_lookup:          `Order detail`,
+    order_items_lookup:           `Order items`,
+    order_extreme_item_lookup:    `Order extreme item`,
   };
   return T[intent] || (intent ? intent.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase()) : 'Result');
 }

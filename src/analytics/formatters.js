@@ -674,6 +674,158 @@ const F = {
     return `${intish(num)} of ${intish(den)} orders (${pct.toFixed(1)}%) included ${what}${windowLabel(plan)}.`;
   },
 
+  // ===== v5: order drill-down =============================================
+  order_detail_lookup(rows, plan) {
+    const r = rows[0] || {};
+    if (!r.order_id) return 'Order not found.';
+    const who = r.customer_name || r.email || '(no customer attached)';
+    const when = shortDate(r.occurred_at);
+    const lines = [];
+    lines.push(`${r.name} was placed on ${when} by ${who}. Total: ${money(r.total_price)}.`);
+    if (r.cancelled_at) lines.push('  STATUS: cancelled on ' + shortDate(r.cancelled_at));
+    else lines.push(`  status: ${r.financial_status || 'n/a'} / ${r.fulfillment_status || 'n/a'}`);
+    lines.push(`  items: ${intish(r.line_item_count)} line item(s), ${intish(r.total_units)} units`);
+    if (Number(r.total_discounts) > 0) lines.push(`  discounts: ${money(r.total_discounts)}`);
+    if (Number(r.total_tax) > 0) lines.push(`  tax: ${money(r.total_tax)}`);
+    return lines.join('\n');
+  },
+
+  order_items_lookup(rows, plan) {
+    if (!rows.length) return 'No line items found for that order.';
+    const orderName = plan && plan.resolved && plan.resolved.order && plan.resolved.order.name;
+    const header = orderName ? `${orderName} items (${rows.length}):` : `Items (${rows.length}):`;
+    const lines = rows.slice(0, 50).map((r, i) =>
+      `${i + 1}. ${r.product_title}${r.variant_title ? ' · ' + r.variant_title : ''} (${r.sku || '-'}) — qty ${intish(r.quantity)} @ ${money(r.unit_price)} = ${money(r.line_total)}`
+    );
+    return `${header}\n${lines.join('\n')}`;
+  },
+
+  order_customer_lookup(rows, plan) {
+    const r = rows[0] || {};
+    if (!r.order_id) return 'Order not found.';
+    const who = r.customer_name || r.email || '(no customer attached — walk-in / guest)';
+    return `${r.name} was placed by ${who}.`;
+  },
+
+  order_total_lookup(rows, plan) {
+    const r = rows[0] || {};
+    if (!r.order_id) return 'Order not found.';
+    return `${r.name} total: ${money(r.total_price)} (subtotal ${money(r.subtotal_price)}, discounts ${money(r.total_discounts)}, tax ${money(r.total_tax)}).`;
+  },
+
+  order_status_lookup(rows, plan) {
+    const r = rows[0] || {};
+    if (!r.order_id) return 'Order not found.';
+    if (r.cancelled_at) return `${r.name} was cancelled on ${shortDate(r.cancelled_at)}.`;
+    return `${r.name}: financial=${r.financial_status || 'n/a'}, fulfillment=${r.fulfillment_status || 'n/a'}, closed=${r.closed_at ? shortDate(r.closed_at) : 'no'}.`;
+  },
+
+  order_extreme_item_lookup(rows, plan) {
+    if (!rows.length) return 'No line items found for that order.';
+    const dir = (plan && plan.params && plan.params.extremeDirection === 'low') ? 'cheapest' : 'most expensive';
+    const r = rows[0];
+    const orderName = plan && plan.resolved && plan.resolved.order && plan.resolved.order.name;
+    return `${orderName ? orderName + ' ' : ''}${dir} item: ${r.product_title}${r.variant_title ? ' · ' + r.variant_title : ''} (${r.sku || '-'}) at ${money(r.unit_price)} × ${intish(r.quantity)} = ${money(r.line_total)}.`;
+  },
+
+  order_includes_category(rows, plan) {
+    const r = rows[0] || {};
+    const cats = (plan && plan.params && plan.params.includeCategories) || [];
+    if (!cats.length) return 'No category specified.';
+    const orderName = plan && plan.resolved && plan.resolved.order && plan.resolved.order.name;
+    const parts = cats.map((c) => {
+      const key = 'has_' + c.replace(/[^a-z0-9]+/gi, '_');
+      const has = r[key];
+      return `${c}: ${has ? 'yes' : 'no'}`;
+    });
+    return `${orderName ? orderName + ' — ' : ''}${parts.join(' · ')}`;
+  },
+
+  // Customer-side drill-down
+  customer_last_order_items(rows, plan) {
+    const header = rows.find((r) => r.bucket === 'order');
+    const items  = rows.filter((r) => r.bucket === 'line');
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    if (!header) return `${who || 'Customer'} has no orders on record.`;
+    const lines = [];
+    lines.push(`${who || 'Customer'} last order ${header.order_name} on ${shortDate(header.occurred_at)} — ${money(header.total_price)} (${items.length} item${items.length === 1 ? '' : 's'}).`);
+    items.slice(0, 20).forEach((it, i) => {
+      lines.push(`  ${i + 1}. ${it.product_title}${it.variant_title ? ' · ' + it.variant_title : ''} (${it.sku || '-'}) — qty ${intish(it.quantity)} @ ${money(it.unit_price)}`);
+    });
+    return lines.join('\n');
+  },
+
+  customer_last_n_orders(rows, plan) {
+    if (!rows.length) return 'No orders on record for that customer.';
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    const lines = rows.map((r, i) =>
+      `${i + 1}. ${r.name} — ${shortDate(r.occurred_at)} — ${money(r.total_price)} (${intish(r.line_items)} items)`
+    );
+    return `${who || 'Customer'} last ${rows.length} order(s):\n${lines.join('\n')}`;
+  },
+
+  customer_comparison(rows, plan) {
+    const pair = plan && plan.resolved && plan.resolved.customerPair;
+    if (!pair) return 'Customer pair not resolved.';
+    const a = rows.find((r) => r.side === 'A') || {};
+    const b = rows.find((r) => r.side === 'B') || {};
+    const aName = pair.left && pair.left.customer_name;
+    const bName = pair.right && pair.right.customer_name;
+    const lines = [];
+    lines.push(`${aName} vs ${bName}${windowLabel(plan)}:`);
+    lines.push(`  Spend: ${money(a.total_spend)} vs ${money(b.total_spend)}`);
+    lines.push(`  Orders: ${intish(a.order_count)} vs ${intish(b.order_count)}`);
+    lines.push(`  Units: ${intish(a.units)} vs ${intish(b.units)}`);
+    lines.push(`  AOV: ${money(a.average_order_value)} vs ${money(b.average_order_value)}`);
+    return lines.join('\n');
+  },
+
+  customer_time_series(rows, plan) {
+    if (!rows.length) return 'No purchase activity in window.';
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    const grain = (plan && plan.params && plan.params.grain) || 'week';
+    const totals = rows.reduce((acc, r) => ({
+      revenue: acc.revenue + Number(r.net_revenue || 0),
+      units:   acc.units   + Number(r.units || 0),
+      orders:  acc.orders  + Number(r.orders || 0),
+    }), { revenue: 0, units: 0, orders: 0 });
+    const buckets = rows.slice(0, 12).map((r) =>
+      `${new Date(r.bucket).toISOString().slice(0, 10)}: ${money(r.net_revenue)} · ${intish(r.units)}u · ${intish(r.orders)}o`
+    );
+    return `${who || 'Customer'} by ${grain}${windowLabel(plan)}:\n${buckets.join('\n')}\nTotal: ${money(totals.revenue)} · ${intish(totals.units)} units · ${intish(totals.orders)} orders.`;
+  },
+
+  customer_change_over_time(rows, plan) {
+    const cur = rows.find((r) => r.bucket === 'current') || {};
+    const prev = rows.find((r) => r.bucket === 'previous') || {};
+    const delta = Number(cur.revenue || 0) - Number(prev.revenue || 0);
+    const pct = Number(prev.revenue) > 0 ? Math.round((delta / Number(prev.revenue)) * 1000) / 10 : null;
+    const pctTxt = pct == null ? 'n/a' : (pct > 0 ? '+' : '') + pct + '%';
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    return `${who || 'Customer'} current period: ${money(cur.revenue)} (${intish(cur.orders)} orders, ${intish(cur.units)} units). Prior period: ${money(prev.revenue)}. Change: ${pctTxt}.`;
+  },
+
+  customer_color_mix(rows, plan) {
+    if (!rows.length) return 'No purchases on record for that customer.';
+    const totalSpend = rows.reduce((a, r) => a + Number(r.spend || 0), 0) || 1;
+    const lines = rows.map((r) => {
+      const pct = (Number(r.spend || 0) / totalSpend * 100).toFixed(1);
+      return `  ${r.color_bucket}: ${money(r.spend)} (${pct}% · ${intish(r.units)} units)`;
+    });
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    return `${who || 'Customer'} color mix${windowLabel(plan)}:\n${lines.join('\n')}`;
+  },
+
+  // Overlap share (e.g. liquor + wine)
+  order_overlap_share(rows, plan) {
+    const r = rows[0] || {};
+    const num = Number(r.numerator || 0);
+    const den = Number(r.denominator || 0);
+    const pct = den ? (num / den) * 100 : 0;
+    const filters = (plan && plan.params && plan.params.overlapFilters) || ['A', 'B'];
+    return `${intish(num)} of ${intish(den)} orders (${pct.toFixed(1)}%) included BOTH ${filters.join(' AND ')}${windowLabel(plan)}.`;
+  },
+
   // Dashboard
   dashboard_summary(rows, plan) {
     const kpi = rows.find((r) => r.bucket === 'kpi') || {};

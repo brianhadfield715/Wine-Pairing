@@ -158,4 +158,50 @@ async function resolveProductByHint({ productHint, sku }) {
   return { status: 'not_found', hint };
 }
 
-module.exports = { resolveCustomer, resolveProduct, resolveProductByHint };
+/**
+ * Resolve an order by canonical name ("#37857") or numeric id.
+ * Returns one of:
+ *   { status: 'ok',         order: {...} }
+ *   { status: 'not_found',  hint: '...' }
+ *
+ * We try by name first (the Shopify-shop-facing identifier) and fall back to
+ * a numeric id match. We never confuse this with a SKU because resolveOrder
+ * is called by the engine ONLY when intentParser has already classified the
+ * question as an order_* intent and `params.orderRef` is set.
+ */
+async function resolveOrder({ name, id }) {
+  if (!name && !id) return { status: 'not_found', hint: null };
+  // 1) By Shopify "name" (which IS the #-prefixed string).
+  if (name) {
+    const r = await db.query(
+      `select id as order_id, name, customer_id, email,
+              processed_at, created_at, cancelled_at, closed_at,
+              financial_status, fulfillment_status, currency,
+              subtotal_price, total_discounts, total_tax, total_price,
+              total_line_items_price, source_name, tags, raw
+         from orders
+        where name = $1
+        limit 1`,
+      [name]
+    );
+    if (r.rows.length === 1) return { status: 'ok', order: r.rows[0] };
+  }
+  // 2) By numeric id (bare digits in the question, no #).
+  if (id) {
+    const r = await db.query(
+      `select id as order_id, name, customer_id, email,
+              processed_at, created_at, cancelled_at, closed_at,
+              financial_status, fulfillment_status, currency,
+              subtotal_price, total_discounts, total_tax, total_price,
+              total_line_items_price, source_name, tags, raw
+         from orders
+        where id = $1
+        limit 1`,
+      [id]
+    );
+    if (r.rows.length === 1) return { status: 'ok', order: r.rows[0] };
+  }
+  return { status: 'not_found', hint: name || (id ? String(id) : null) };
+}
+
+module.exports = { resolveCustomer, resolveProduct, resolveProductByHint, resolveOrder };

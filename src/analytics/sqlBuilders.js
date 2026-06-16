@@ -2184,6 +2184,354 @@ function dashboardSummary(p) {
   return { text, values: w.values, meta: { domain: 'dashboard', timeframe: tf } };
 }
 
+// ===========================================================================
+// LANGUAGE-EXPANSION v5: CRM, order drill-down, customer comparisons,
+// customer change-over-time, overlap shares.
+// ===========================================================================
+
+// --- Order drill-down -----------------------------------------------------
+//
+// All builders assume resolveOrder() already populated plan.resolved.order
+// (single row from `orders`). They DO NOT use any user-supplied id directly
+// inside the SQL text — only as a $N parameter.
+
+function orderDetail(p) {
+  const oid = p.resolved && p.resolved.order && p.resolved.order.order_id;
+  if (!oid) return { text: 'select null where false', values: [], meta: { domain: 'orders' } };
+  const text = `
+    select o.id as order_id, o.name, o.customer_id, o.email,
+           coalesce(o.processed_at, o.created_at) as occurred_at,
+           o.cancelled_at, o.closed_at,
+           o.financial_status, o.fulfillment_status, o.currency,
+           o.subtotal_price, o.total_discounts, o.total_tax, o.total_price,
+           o.total_line_items_price, o.source_name, o.tags,
+           trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) as customer_name,
+           (select count(*) from order_line_items oli where oli.order_id = o.id)::int as line_item_count,
+           (select coalesce(sum(quantity), 0) from order_line_items oli where oli.order_id = o.id)::int as total_units
+      from orders o
+      left join customers c on c.id = o.customer_id
+     where o.id = $1
+     limit 1
+  `;
+  return { text, values: [oid], meta: { domain: 'orders' } };
+}
+
+function orderItems(p) {
+  const oid = p.resolved && p.resolved.order && p.resolved.order.order_id;
+  if (!oid) return { text: 'select null where false', values: [], meta: { domain: 'orders' } };
+  const text = `
+    select oli.id as line_item_id,
+           oli.sku, oli.title as product_title, oli.variant_title,
+           oli.vendor, oli.quantity, oli.price as unit_price,
+           coalesce(oli.total_discount, 0)::numeric(12,2) as line_discount,
+           (oli.quantity * oli.price)::numeric(14,2)       as line_total,
+           p.product_type
+      from order_line_items oli
+      left join products p on p.id = oli.product_id
+     where oli.order_id = $1
+     order by oli.id asc
+  `;
+  return { text, values: [oid], meta: { domain: 'orders' } };
+}
+
+function orderExtremeItem(p) {
+  // Most-expensive (default) or cheapest line item ON one specific order.
+  const oid = p.resolved && p.resolved.order && p.resolved.order.order_id;
+  if (!oid) return { text: 'select null where false', values: [], meta: { domain: 'orders' } };
+  const direction = (p.extremeDirection === 'low') ? 'asc' : 'desc';
+  const text = `
+    select oli.sku, oli.title as product_title, oli.variant_title, oli.vendor,
+           oli.quantity, oli.price as unit_price,
+           (oli.quantity * oli.price)::numeric(14,2) as line_total
+      from order_line_items oli
+     where oli.order_id = $1
+       and oli.price is not null
+     order by oli.price ${direction} nulls last
+     limit 5
+  `;
+  return { text, values: [oid], meta: { domain: 'orders' } };
+}
+
+// "Did order X include liquor / wine / both?" — runs the category match
+// against the order's line items.
+function orderIncludesCategory(p) {
+  const oid = p.resolved && p.resolved.order && p.resolved.order.order_id;
+  if (!oid) return { text: 'select null where false', values: [], meta: { domain: 'orders' } };
+  const cats = Array.isArray(p.includeCategories) ? p.includeCategories : [p.category || 'wine'];
+  // Build a series of EXISTS(...) tests, one per category.
+  const values = [oid];
+  let i = 2;
+  const selectExprs = cats.map((c) => {
+    values.push(`%${c}%`);
+    const idx = i++;
+    // Match against title/variant_title/product_type.
+    return `exists (select 1 from order_line_items x left join products p on p.id = x.product_id
+                    where x.order_id = $1
+                      and (lower(x.title) like lower($${idx})
+                        or lower(x.variant_title) like lower($${idx})
+                        or lower(coalesce(p.product_type,'')) like lower($${idx})))
+            as has_${c.replace(/[^a-z0-9]+/gi, '_')}`;
+  });
+  const text = `select ${selectExprs.join(', ')}`;
+  return { text, values, meta: { domain: 'orders', categories: cats } };
+}
+
+// --- Customer-side drill-down ---------------------------------------------
+
+function customerLastOrderItems(p) {
+  // The LAST order for the resolved customer, plus its line items, in one
+  // statement returned as two-row-shape: first row {bucket:'order',...},
+  // followed by N rows {bucket:'line',...}.
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'orders' } };
+  const text = `
+    with latest as (
+      select o.id as order_id, o.name, o.customer_id,
+             coalesce(o.processed_at, o.created_at) as occurred_at,
+             o.total_price, o.cancelled_at, o.financial_status, o.fulfillment_status
+        from orders o
+       where o.customer_id = $1
+         and o.cancelled_at is null
+       order by coalesce(o.processed_at, o.created_at) desc
+       limit 1
+    )
+    select 'order'::text as bucket,
+           latest.order_id, latest.name as order_name, latest.occurred_at,
+           latest.total_price::numeric(14,2) as total_price,
+           latest.financial_status, latest.fulfillment_status,
+           null::text as sku, null::text as product_title, null::text as variant_title,
+           null::int  as quantity, null::numeric(12,2) as unit_price
+      from latest
+    union all
+    select 'line', latest.order_id, latest.name, null,
+           null, null, null,
+           oli.sku, oli.title, oli.variant_title,
+           oli.quantity, oli.price
+      from latest
+      join order_line_items oli on oli.order_id = latest.order_id
+     order by bucket desc, quantity desc nulls last
+  `;
+  return { text, values: [cid], meta: { domain: 'orders' } };
+}
+
+function customerLastNOrders(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'orders' } };
+  const limit = p.limit || 5;
+  const text = `
+    select o.id as order_id, o.name, coalesce(o.processed_at, o.created_at) as occurred_at,
+           o.total_price::numeric(14,2) as total_price,
+           o.financial_status, o.fulfillment_status,
+           (select count(*) from order_line_items oli where oli.order_id = o.id)::int as line_items
+      from orders o
+     where o.customer_id = $1
+       and o.cancelled_at is null
+     order by coalesce(o.processed_at, o.created_at) desc
+     limit $2
+  `;
+  return { text, values: [cid, limit], meta: { domain: 'orders' } };
+}
+
+// --- Customer comparison (multi-metric, two customers) --------------------
+function customerComparison(p) {
+  const pair = p.resolved && p.resolved.customerPair;
+  if (!pair || !pair.left || !pair.right) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const a = pair.left.customer_id;
+  const b = pair.right.customer_id;
+  const w = windowFragments('fs.occurred_at', p.timeframe, 3);
+  const values = [a, b, ...w.values];
+  const wFrag = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      $1::bigint as customer_id,
+      'A'::text  as side,
+      coalesce(sum(case when fs.customer_id = $1 then fs.net_revenue end), 0)::numeric(14,2) as total_spend,
+      coalesce(sum(case when fs.customer_id = $1 then fs.quantity end), 0)::int              as units,
+      count(distinct case when fs.customer_id = $1 then fs.order_id end)::int                as order_count,
+      case when count(distinct case when fs.customer_id = $1 then fs.order_id end) > 0
+           then (sum(case when fs.customer_id = $1 then fs.net_revenue end)
+                 / count(distinct case when fs.customer_id = $1 then fs.order_id end))::numeric(14,2)
+           else 0 end                                                                          as average_order_value,
+      min(case when fs.customer_id = $1 then fs.occurred_at end) as first_order_at,
+      max(case when fs.customer_id = $1 then fs.occurred_at end) as last_order_at
+      from fact_sales fs
+     where (fs.customer_id = $1 or fs.customer_id = $2) ${wFrag}
+    union all
+    select
+      $2::bigint,
+      'B',
+      coalesce(sum(case when fs.customer_id = $2 then fs.net_revenue end), 0)::numeric(14,2),
+      coalesce(sum(case when fs.customer_id = $2 then fs.quantity end), 0)::int,
+      count(distinct case when fs.customer_id = $2 then fs.order_id end)::int,
+      case when count(distinct case when fs.customer_id = $2 then fs.order_id end) > 0
+           then (sum(case when fs.customer_id = $2 then fs.net_revenue end)
+                 / count(distinct case when fs.customer_id = $2 then fs.order_id end))::numeric(14,2)
+           else 0 end,
+      min(case when fs.customer_id = $2 then fs.occurred_at end),
+      max(case when fs.customer_id = $2 then fs.occurred_at end)
+      from fact_sales fs
+     where (fs.customer_id = $1 or fs.customer_id = $2) ${wFrag}
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+// --- Customer time series (per-customer weekly revenue/units) ------------
+function customerTimeSeries(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const grain = grainToTrunc(p.grain || (p.timeframe && p.timeframe.seriesGrain) || 'week');
+  // Default to last 10 weeks if no timeframe.
+  let tf = p.timeframe;
+  if (!tf || tf.mode === 'all_time') {
+    const now = new Date();
+    tf = {
+      mode: 'window',
+      sinceIso: new Date(now - 10 * 7 * 86400e3).toISOString(),
+      untilIso: now.toISOString(),
+      label: 'last 10 weeks (default)',
+      days: 70,
+    };
+  }
+  const w = windowFragments('fs.occurred_at', tf, 2);
+  const values = [cid, ...w.values];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select date_trunc('${grain}', fs.occurred_at) as bucket,
+           sum(fs.quantity)::int                  as units,
+           sum(fs.net_revenue)::numeric(14,2)     as net_revenue,
+           count(distinct fs.order_id)::int       as orders
+      from fact_sales fs
+     where fs.customer_id = $1 ${where}
+     group by bucket
+     order by bucket asc
+  `;
+  return { text, values, meta: { domain: 'customers', grain, timeframe: tf } };
+}
+
+// --- Customer change-over-time (window vs prior equal-length window) -----
+function customerChangeOverTime(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  // Default 6 months vs prior 6 months.
+  let tf = p.timeframe;
+  if (!tf || tf.mode === 'all_time') {
+    const now = new Date();
+    tf = {
+      mode: 'window',
+      sinceIso: new Date(now - 180 * 86400e3).toISOString(),
+      untilIso: now.toISOString(),
+      label: 'last 6 months (default)',
+      days: 180,
+    };
+  }
+  const widthMs = new Date(tf.untilIso) - new Date(tf.sinceIso);
+  const priorSince = new Date(new Date(tf.sinceIso).getTime() - widthMs).toISOString();
+  const priorUntil = tf.sinceIso;
+  const text = `
+    with cur as (
+      select
+        sum(fs.net_revenue)::numeric(14,2) as revenue,
+        sum(fs.quantity)::int              as units,
+        count(distinct fs.order_id)::int   as orders
+        from fact_sales fs
+       where fs.customer_id = $1
+         and fs.occurred_at >= $2::timestamptz
+         and fs.occurred_at <  $3::timestamptz
+    ),
+    prev as (
+      select
+        sum(fs.net_revenue)::numeric(14,2) as revenue,
+        sum(fs.quantity)::int              as units,
+        count(distinct fs.order_id)::int   as orders
+        from fact_sales fs
+       where fs.customer_id = $1
+         and fs.occurred_at >= $4::timestamptz
+         and fs.occurred_at <  $5::timestamptz
+    )
+    select 'current'  as bucket, coalesce(cur.revenue, 0)::numeric(14,2) as revenue,
+           coalesce(cur.units, 0)::int as units, coalesce(cur.orders, 0)::int as orders
+      from cur
+    union all
+    select 'previous', coalesce(prev.revenue, 0)::numeric(14,2),
+           coalesce(prev.units, 0)::int, coalesce(prev.orders, 0)::int
+      from prev
+  `;
+  return {
+    text,
+    values: [cid, tf.sinceIso, tf.untilIso, priorSince, priorUntil],
+    meta: { domain: 'customers', window_current: { sinceIso: tf.sinceIso, untilIso: tf.untilIso }, window_previous: { sinceIso: priorSince, untilIso: priorUntil } },
+  };
+}
+
+// Color/red-vs-white mix for one customer.
+function customerColorMix(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const w = windowFragments('fs.occurred_at', p.timeframe, 2);
+  const values = [cid, ...w.values];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      case
+        when lower(fs.product_title) like '%sparkling%' or lower(fs.product_title) like '%champagne%'
+             or lower(fs.product_title) like '%prosecco%' or lower(fs.product_title) like '%cava%' then 'sparkling'
+        when lower(fs.product_title) like '%ros%' then 'rose'
+        when lower(fs.product_title) like '%white%'
+             or lower(fs.product_title) like '%chardonnay%' or lower(fs.product_title) like '%sauvignon blanc%'
+             or lower(fs.product_title) like '%riesling%' or lower(fs.product_title) like '%pinot grigio%'
+             or lower(fs.product_title) like '%pinot gris%' or lower(fs.product_title) like '%albari%'
+             or lower(fs.product_title) like '%vermentino%' or lower(fs.product_title) like '%gru%veltliner%' then 'white'
+        when lower(fs.product_title) like '%red%'
+             or lower(fs.product_title) like '%pinot noir%' or lower(fs.product_title) like '%cabernet%'
+             or lower(fs.product_title) like '%merlot%' or lower(fs.product_title) like '%syrah%'
+             or lower(fs.product_title) like '%malbec%' or lower(fs.product_title) like '%zinfandel%'
+             or lower(fs.product_title) like '%sangiovese%' or lower(fs.product_title) like '%nebbiolo%'
+             or lower(fs.product_title) like '%grenache%' or lower(fs.product_title) like '%tempranillo%' then 'red'
+        else 'other'
+      end as color_bucket,
+      sum(fs.quantity)::int              as units,
+      sum(fs.net_revenue)::numeric(14,2) as spend,
+      count(distinct fs.order_id)        as orders
+      from fact_sales fs
+     where fs.customer_id = $1 ${where}
+     group by 1
+     order by spend desc nulls last
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+// --- Overlap: orders with both X and Y (e.g., liquor + wine) -------------
+function orderOverlapShare(p) {
+  // Numerator: orders containing ALL listed filters (e.g. wine AND liquor).
+  // Denominator: all non-cancelled orders in window.
+  const filters = Array.isArray(p.overlapFilters) && p.overlapFilters.length
+    ? p.overlapFilters
+    : ['wine', 'liquor'];
+  const w = windowFragments('o.created_at', p.timeframe, 1);
+  const values = [...w.values];
+  let i = w.nextIdx;
+  const exists = filters.map((f) => {
+    values.push(`%${f}%`);
+    const idx = i++;
+    return `exists (
+      select 1 from order_line_items x
+       left join products p on p.id = x.product_id
+       where x.order_id = o.id
+         and (lower(x.title) like lower($${idx})
+           or lower(x.variant_title) like lower($${idx})
+           or lower(coalesce(p.product_type,'')) like lower($${idx})))`;
+  }).join(' and ');
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      count(distinct o.id) filter (where o.cancelled_at is null and ${exists})::int as numerator,
+      count(distinct o.id) filter (where o.cancelled_at is null)::int                as denominator
+      from orders o
+     ${where}
+  `;
+  return { text, values, meta: { domain: 'orders', filters } };
+}
+
 module.exports = {
   // customers
   topCustomersBySpend,
@@ -2291,4 +2639,16 @@ module.exports = {
   shareOfDeadInventoryValue,
   shareOfOrdersWithFilter,
   dashboardSummary,
+  // v5
+  orderDetail,
+  orderItems,
+  orderExtremeItem,
+  orderIncludesCategory,
+  customerLastOrderItems,
+  customerLastNOrders,
+  customerComparison,
+  customerTimeSeries,
+  customerChangeOverTime,
+  customerColorMix,
+  orderOverlapShare,
 };

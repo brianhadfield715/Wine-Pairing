@@ -1,10 +1,10 @@
-// src/analytics/entities.js
+﻿// src/analytics/entities.js
 // Pulls non-temporal "what's the question about" hints out of a question:
 // customer name / email, product hint, vendor, sku, color, varietal, money
-// threshold, limit. These are *hints*, not resolved DB ids — see resolver.js.
+// threshold, limit. These are *hints*, not resolved DB ids - see resolver.js.
 
-const COLOR_WORDS = ['sparkling', 'red', 'white', 'rose', 'rosé', 'orange'];
-const COLOR_NORMALIZE = { 'rosé': 'rose' };
+const COLOR_WORDS = ['sparkling', 'red', 'white', 'rose', 'rose', 'orange'];
+const COLOR_NORMALIZE = { 'rose': 'rose' };
 
 const VARIETALS = [
   // reds
@@ -14,9 +14,9 @@ const VARIETALS = [
   // whites
   'chardonnay', 'sauvignon blanc', 'riesling', 'chenin blanc', 'chenin',
   'viognier', 'pinot grigio', 'pinot gris', 'gruner veltliner', 'gruner',
-  'albarino', 'albariño', 'vermentino', 'gewurztraminer',
+  'albarino', 'albarino', 'vermentino', 'gewurztraminer',
   // sparkling / other
-  'champagne', 'prosecco', 'cava', 'lambrusco', 'rose', 'rosé',
+  'champagne', 'prosecco', 'cava', 'lambrusco', 'rose', 'rose',
 ];
 
 // Words that should NEVER be treated as a customer name even if capitalized.
@@ -42,13 +42,13 @@ function tokensFromCapWords(raw) {
   // Find runs of capitalized words in the original (case-sensitive) question.
   // Returns each run as a string ("John Smith", "Mary Jane O'Brien").
   if (!raw) return [];
-  const matches = raw.match(/\b[A-Z][a-zA-Z'’\-]{1,}(?:\s+[A-Z][a-zA-Z'’\-]+){0,4}/g);
+  const matches = raw.match(/\b[A-Z][a-zA-Z''\-]{1,}(?:\s+[A-Z][a-zA-Z''\-]+){0,4}/g);
   return matches || [];
 }
 
 function cleanCustomerCandidate(s) {
   // Trim, collapse whitespace, drop trailing punctuation.
-  return s.replace(/[^A-Za-z'’\- ]+$/g, '').replace(/\s+/g, ' ').trim();
+  return s.replace(/[^A-Za-z''\- ]+$/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function looksLikeName(s) {
@@ -57,7 +57,7 @@ function looksLikeName(s) {
   if (parts.length < 2 || parts.length > 5) return false;
   for (const w of parts) {
     if (NAME_STOPWORDS.has(w.toLowerCase())) return false;
-    if (!/^[A-Z][a-zA-Z'’\-]{1,}$/.test(w)) return false;
+    if (!/^[A-Z][a-zA-Z''\-]{1,}$/.test(w)) return false;
   }
   return true;
 }
@@ -80,9 +80,16 @@ const NAME_TAIL_TRIM = [
   /\s+ever\b.*$/i,
   /\s+(?:in|over|since|after|before)\s+(?:the\s+)?\d.*$/i,
   /\s+(?:in|over)\s+(?:the\s+)?(?:last|past)\s+\d+\s+(?:days?|weeks?|months?|years?)\b.*$/i,
+  /\s+(?:last|past|this|next)\s+\d+\s+(?:days?|weeks?|months?|years?)\b.*$/i,
   /\s+(?:last|past|this|next)\s+(?:week|month|quarter|year|day)\b.*$/i,
   /\s+(?:today|yesterday|tomorrow)\b.*$/i,
   /\s+(?:year[- ]to[- ]date|ytd|month[- ]to[- ]date|mtd|quarter[- ]to[- ]date|qtd)\b.*$/i,
+  // Behavior / preference / comparison verbs that should NOT be part of a name.
+  /\s+(?:usually|typically|normally|often|mostly|mainly|generally|most|reorder|reorders)\b.*$/i,
+  /\s+(?:like|likes|prefer|prefers|favorite|favorites|favourite|favourites)\b.*$/i,
+  /\s+(?:buy|buys|bought|buying|purchase|purchases|purchased|purchasing|order|orders|ordered|ordering|get|gets|spend|spent|spending|shop|shops|shopped|shopping|drink|drinks|drank|drinking|tastes?)\b.*$/i,
+  // "compare X with/and/vs/versus Y" - the trailing connector + Y is not part of X.
+  /\s+(?:with|and|vs|versus|against|or)\s+.+$/i,
   /[?.!,;:]+$/,
 ];
 
@@ -98,25 +105,45 @@ function trimNameTail(s) {
 // the NAME_TAIL_TRIM pass.
 const PHRASE_PATTERNS = [
   // "how much (did|has|have|do|does) <name> (spent|spend|spending|spends|owe|owed)..."
-  /how\s+much\s+(?:did|has|have|do|does)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:spend|spent|spending|spends|owe|owed)/i,
-  // "what (has|did|does|do) <name> (spent|spend|spending|bought|buy|buys|order|ordered|orders|purchased|purchase|purchases|like)..."
-  /what\s+(?:has|did|have|does|do)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:spent|spend|spending|bought|buy|buys|order|orders|ordered|purchased|purchase|purchases|like|prefer)/i,
-  // "what (varietal|vendor|product|category|wine) (does|do) <name> (buy|purchase|like|prefer) ..."
-  /what\s+(?:varietal|vendor|product|category|wine|wines)\s+(?:does|do|did)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:buy|buys|bought|purchase|purchases|purchased|like|prefer|order|orders|ordered)/i,
+  /how\s+much\s+(?:did|has|have|do|does)\s+([a-z][a-z .''\-]{1,60}?)\s+(?:spend|spent|spending|spends|owe|owed)/i,
+  // "what (has|did|does|do) <name> (spent|spend|spending|bought|buy|buys|order|ordered|orders|purchased|purchase|purchases|like|prefer|reorder|drink|get)..."
+  /what\s+(?:has|did|have|does|do)\s+([a-z][a-z .''\-]{1,60}?)\s+(?:spent|spend|spending|bought|buy|buys|order|orders|ordered|purchased|purchase|purchases|like|likes|prefer|prefers|reorder|reorders|drink|drinks|drank|get|gets)/i,
+  // "what (varietal|vendor|product|category|wine|wines|regions|brands|types|categories) (does|do) <name> (buy|purchase|like|prefer) ..."
+  /what\s+(?:varietal|varietals|vendor|vendors|product|products|category|categories|wine|wines|brand|brands|region|regions|type|types)\s+(?:does|do|did)\s+([a-z][a-z .''\-]{1,60}?)\s+(?:buy|buys|bought|purchase|purchases|purchased|like|likes|prefer|prefers|order|orders|ordered|usually|typically|normally|mostly)/i,
+  // "what (is|are) <name>('s)? favorite(s)? ..."
+  /what\s+(?:is|are)\s+([a-z][a-z .''\-]{1,60}?)(?:'s)?\s+favorites?(?:\s+\w+)?/i,
   // "how many (units|bottles|items|cases|orders) (has|did|have) <name> (bought|buy|placed|ordered|order)..."
-  /how\s+many\s+(?:units?|bottles?|items?|cases?|orders?)\s+(?:has|did|have)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:bought|buy|placed|ordered|order|purchased)/i,
+  /how\s+many\s+(?:units?|bottles?|items?|cases?|orders?)\s+(?:has|did|have)\s+([a-z][a-z .''\-]{1,60}?)\s+(?:bought|buy|placed|ordered|order|purchased)/i,
+  // "(does|do|did) <name> (usually|typically|normally|mostly)? (buy|drink|get|purchase|order|prefer|reorder) ..."
+  /(?:does|do|did)\s+([a-z][a-z .''\-]{1,60}?)\s+(?:usually|typically|normally|mostly|mainly)?\s*(?:buy|buys|bought|drink|drinks|drank|get|gets|purchase|purchases|purchased|order|orders|ordered|prefer|prefers|reorder|reorders|shop|shops|shopped)/i,
+  // "(has|have) <name> (shifted|moved|migrated|been|usually|started) ..."
+  /(?:has|have)\s+([a-z][a-z .''\-]{1,60}?)\s+(?:shifted|moved|migrated|been|usually|started|stopped|changed)/i,
+  // "how has <name> (buying|spending|shopping|tastes?) changed..."
+  /how\s+has\s+([a-z][a-z .''\-]{1,60}?)\s+(?:buying|spending|shopping|tastes?)/i,
   // "when did <name> last (shop|order|buy|purchase|visit)..."
-  /when\s+(?:did|was)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:last|most\s+recently)\s+(?:shop|order|buy|purchase|visit)/i,
+  /when\s+(?:did|was)\s+([a-z][a-z .''\-]{1,60}?)\s+(?:last|most\s+recently)\s+(?:shop|order|buy|purchase|visit)/i,
   // "what did <name> (buy|order|purchase|spend) ..."
-  /what\s+did\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:buy|bought|order|ordered|purchase|purchased|spend|spent)/i,
+  /what\s+did\s+([a-z][a-z .''\-]{1,60}?)\s+(?:buy|bought|order|ordered|purchase|purchased|spend|spent)/i,
+  // "show me <name>('s)? last (order|N orders|recent purchases)"
+  /show\s+me\s+([a-z][a-z .''\-]{1,60}?)(?:'s)?\s+(?:last|recent|biggest|largest|smallest|most\s+recent)\s+(?:order|orders|\d+\s+orders|purchases?)/i,
+  // "what was on <name>('s)? last order"
+  /what\s+(?:was|is)\s+(?:on|in)\s+([a-z][a-z .''\-]{1,60}?)(?:'s)?\s+(?:last|biggest|recent|most\s+recent)\s+(?:order|orders)/i,
+  // "(chart|graph|plot|show|make a chart of) <name>('s)? (revenue|units|spend|orders|sales)"
+  /(?:chart|graph|plot|show|make\s+a\s+chart\s+of)\s+([a-z][a-z .'\-]{1,60}?)(?:'s)?\s+(?:revenue|units|spend|orders?|sales|units\s+bought|bottles\s+bought)/i,
+  // "compare <name> (with|and|to|vs|versus) ..."  (captures left side; pair extractor handles both)
+  // Allow any character in the capture so phrases like "compare X last 6 months to"
+  // can still progress past the digit; trimNameTail then strips the tail.
+  /compare\s+([a-z][^?.!,;:]{1,80}?)\s+(?:with|and|to|vs\.?|versus|against)\s/i,
+  // "<name> (vs|versus|against) <other>" - captures left side
+  /^([a-z][a-z .'\-]{1,60}?)\s+(?:vs\.?|versus|against)\s+/i,
   // "is <name> still active"
-  /is\s+([a-z][a-z .'’\-]{1,60}?)\s+still\s+active/i,
+  /is\s+([a-z][a-z .''\-]{1,60}?)\s+still\s+active/i,
   // possessive: "<name>'s recent purchases / favorite / average order value"
-  /([a-z][a-z .'’\-]{1,60}?)['’]s\s+(?:recent|favorite|favourite|average|last|last\s+\d+|order|spend|spending|profile|customer\s+profile)/i,
-  // "(show me )?(customer profile|profile) for/of <name>" — must explicitly
+  /([a-z][a-z .''\-]{1,60}?)['']s\s+(?:recent|favorite|favourite|average|last|last\s+\d+|order|spend|spending|profile|customer\s+profile)/i,
+  // "(show me )?(customer profile|profile) for/of <name>" - must explicitly
   // mention customer/profile to avoid eating product hints like "show me
   // details about olive brine".
-  /(?:show\s+me\s+the\s+|the\s+)?(?:customer\s+profile|profile)\s+(?:for|of)\s+([a-z][a-z .'’\-]{1,60}?)(?:[?.!,;:]|$)/i,
+  /(?:show\s+me\s+the\s+|the\s+)?(?:customer\s+profile|profile)\s+(?:for|of)\s+([a-z][a-z .''\-]{1,60}?)(?:[?.!,;:]|$)/i,
 ];
 
 function extractCustomerHint(raw) {
@@ -150,7 +177,7 @@ function looksLikeNameCI(s) {
   if (parts.length < 2 || parts.length > 5) return false;
   for (const w of parts) {
     if (NAME_STOPWORDS.has(w.toLowerCase())) return false;
-    if (!/^[a-zA-Z][a-zA-Z'’\-]{1,}$/.test(w)) return false;
+    if (!/^[a-zA-Z][a-zA-Z''\-]{1,}$/.test(w)) return false;
   }
   return true;
 }
@@ -183,13 +210,13 @@ function extractVarietal(q) {
     if (lower.includes(v) && (!best || v.length > best.length)) best = v;
   }
   // Normalize accented variants to canonical form.
-  if (best === 'albariño') best = 'albarino';
-  if (best === 'rosé') best = 'rose';
+  if (best === 'albarino') best = 'albarino';
+  if (best === 'rose') best = 'rose';
   return best;
 }
 
 function extractVendor(q) {
-  // Heuristic only — `vendor X`, `winery X`, `producer X`.
+  // Heuristic only - `vendor X`, `winery X`, `producer X`.
   const m = q.match(/(?:vendor|producer|winery)\s+([a-z0-9 &.\-']{2,40})/i);
   if (m) return m[1].trim();
   return null;
@@ -228,7 +255,7 @@ function extractMoneyThreshold(q) {
   return null;
 }
 
-// "fewer than 6 units left", "less than 3 units", "below 10 units" — these
+// "fewer than 6 units left", "less than 3 units", "below 10 units" - these
 // are about *quantity*, not price. Returned as { op:'<', value:N }.
 function extractUnitThreshold(q) {
   const m = q.match(/(?:fewer\s+than|less\s+than|below|under)\s+(\d+)\s+(?:units?|bottles?|cases?|items?)\s*(?:left|on\s+hand|in\s+stock)?/);
@@ -256,15 +283,15 @@ function extractMetric(q) {
   return null;
 }
 
-// "gift items", "gift boxes" → category hint that survives into builders as
+// "gift items", "gift boxes" -> category hint that survives into builders as
 // a substring filter on product type/title.
 //
 // Also covers broader taxonomy synonyms requested by the manager spec:
-//   liquor / spirit / spirits / hard alcohol → 'spirit'
-//   beer / cider                              → 'beer'
-//   non-wine / non wine                       → 'non-wine'
-//   mixer / mixers / tonic / soda             → 'mixer'
-//   gift items / gift boxes / gift sets       → 'gift'
+//   liquor / spirit / spirits / hard alcohol -> 'spirit'
+//   beer / cider                              -> 'beer'
+//   non-wine / non wine                       -> 'non-wine'
+//   mixer / mixers / tonic / soda             -> 'mixer'
+//   gift items / gift boxes / gift sets       -> 'gift'
 function extractCategory(q) {
   if (/\b(?:spirits?|liquor|hard\s+alcohol)\b/.test(q)) return 'spirit';
   if (/\b(?:beer|ciders?)\b/.test(q)) return 'beer';
@@ -310,18 +337,79 @@ function extractShareIntent(q) {
   return /\b(?:what\s+(?:percent|percentage|share|fraction)|share\s+of)\b/.test(q);
 }
 
+// Order number / order reference extraction.
+// Accepts:
+//   - "#37857"
+//   - "order #37857" / "order 37857" / "order number 37857"
+//   - "ticket #37857" / "receipt #37857"
+// Returns the numeric id (without the leading #) plus the canonical name
+// ("#37857") that the orders table stores.
+function extractOrderRef(raw) {
+  if (!raw) return null;
+  const text = String(raw);
+  // 1) "order|ticket|receipt (#|number)?  N"
+  let m = text.match(/\b(?:order|ticket|receipt)\s*(?:number\s+|#)?(\d{2,12})\b/i);
+  if (m) {
+    const n = m[1];
+    return { id: n, name: '#' + n, raw: m[0] };
+  }
+  // 2) Hash-prefixed: "#37857" anywhere
+  m = text.match(/(?:^|[^A-Za-z0-9])#(\d{2,12})\b/);
+  if (m) {
+    const n = m[1];
+    return { id: n, name: '#' + n, raw: '#' + n };
+  }
+  return null;
+}
+
+// Extracts a customer-pair: "compare X to Y" / "X vs Y" / "who spends more, X or Y".
+// Returns { left, right } when two plausible names found, otherwise null.
+function extractCustomerPair(raw) {
+  if (!raw) return null;
+  const text = String(raw);
+
+  // Pattern A: "compare X (with|and|to|vs|versus|against) Y"
+  let m = text.match(/\bcompare\s+(.+?)\s+(?:with|and|to|vs\.?|versus|against)\s+(.+?)(?:[?.!,;:]|$)/i);
+  if (m) {
+    const left = trimNameTail(m[1]);
+    const right = trimNameTail(m[2]);
+    if (looksLikeNameCI(left) && looksLikeNameCI(right)) {
+      return { left: normalizeName(left), right: normalizeName(right) };
+    }
+  }
+  // Pattern B: "who (spends|orders|buys) more, X or Y" / "who (spends|orders|buys) more X or Y"
+  m = text.match(/\bwho\s+(?:spends|spent|orders|ordered|buys|bought|shops|shopped|drinks?)\s+more,?\s+(.+?)\s+or\s+(.+?)(?:[?.!,;:]|$)/i);
+  if (m) {
+    const left = trimNameTail(m[1]);
+    const right = trimNameTail(m[2]);
+    if (looksLikeNameCI(left) && looksLikeNameCI(right)) {
+      return { left: normalizeName(left), right: normalizeName(right) };
+    }
+  }
+  // Pattern C: bare "X vs Y" / "X versus Y" / "X against Y"
+  m = text.match(/([A-Za-z][A-Za-z .''\-]{1,40})\s+(?:vs\.?|versus|against)\s+([A-Za-z][A-Za-z .''\-]{1,40})/);
+  if (m) {
+    const left = trimNameTail(m[1]);
+    const right = trimNameTail(m[2]);
+    if (looksLikeNameCI(left) && looksLikeNameCI(right)) {
+      return { left: normalizeName(left), right: normalizeName(right) };
+    }
+  }
+  return null;
+}
+
 // Pulls a free-text product hint from common phrasings:
 //   "commonly bought with <X>"
 //   "what is sold with <X>"
 //   "tell/show/give me the details (about|on|for|of) <X>"
 //   "details for SKU <X>"  (the SKU side is already extracted separately)
-//   "tell me about <X>" — broad fallback when no email present
+//   "tell me about <X>" - broad fallback when no email present
 function extractProductHint(raw) {
   if (!raw) return null;
   const q = String(raw);
 
   // 1) "bought/sold/paired/purchased/together with <hint>"
-  let m = q.match(/\b(?:bought|sold|paired|purchased|together)\s+with\s+([A-Za-z][A-Za-z0-9 '’\-]{2,60})/i);
+  let m = q.match(/\b(?:bought|sold|paired|purchased|together)\s+with\s+([A-Za-z][A-Za-z0-9 ''\-]{2,60})/i);
   if (m) return trimProductHint(m[1]);
 
   // 2) "(tell|show|give) (me )?(the )?(full )?(product )?details? (about|on|for|of) <hint>"
@@ -333,7 +421,7 @@ function extractProductHint(raw) {
   if (m) return trimProductHint(m[1]);
 
   // 4) capitalized after bare "with " (existing behavior)
-  m = q.match(/\bwith\s+([A-Z][A-Za-z0-9 '’\-]{2,40})/);
+  m = q.match(/\bwith\s+([A-Z][A-Za-z0-9 ''\-]{2,40})/);
   if (m) return trimProductHint(m[1]);
 
   return null;
@@ -341,7 +429,7 @@ function extractProductHint(raw) {
 
 function trimProductHint(s) {
   let v = String(s || '').trim();
-  // Strip the leading "SKU XXX" form — SKUs are handled by extractSku.
+  // Strip the leading "SKU XXX" form - SKUs are handled by extractSku.
   v = v.replace(/^sku\s+/i, '');
   // Trim trailing punctuation.
   v = v.replace(/[?.!,;:]+$/g, '').trim();
@@ -376,6 +464,8 @@ function extract(raw) {
     chartType:       extractChartType(lower),
     customerSegment: extractCustomerSegment(lower),
     shareIntent:     extractShareIntent(lower),
+    orderRef:        extractOrderRef(q),
+    customerPair:    extractCustomerPair(q),
   };
 }
 
@@ -398,6 +488,8 @@ module.exports = {
   extractChartType,
   extractCustomerSegment,
   extractShareIntent,
+  extractOrderRef,
+  extractCustomerPair,
   looksLikeName,
   looksLikeNameCI,
   normalizeName,

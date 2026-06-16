@@ -140,6 +140,26 @@ const registry = {
 
   // --- v4: dashboard ---------------------------------------------------
   dashboard_summary:             { builder: b.dashboardSummary,            describe: 'Bundled KPI dashboard + top products + top vendors.',    domain: 'dashboard' },
+
+  // --- v5: order drill-down --------------------------------------------
+  order_detail_lookup:          { builder: b.orderDetail,                 describe: 'Full detail (header) for one order.',                     domain: 'orders', needsOrder: true },
+  order_items_lookup:           { builder: b.orderItems,                  describe: 'Line items for one order.',                                domain: 'orders', needsOrder: true },
+  order_customer_lookup:        { builder: b.orderDetail,                 describe: 'Who placed one order.',                                    domain: 'orders', needsOrder: true },
+  order_total_lookup:           { builder: b.orderDetail,                 describe: 'Total for one order.',                                     domain: 'orders', needsOrder: true },
+  order_status_lookup:          { builder: b.orderDetail,                 describe: 'Status of one order (cancelled/fulfilled/refunded).',     domain: 'orders', needsOrder: true },
+  order_extreme_item_lookup:    { builder: b.orderExtremeItem,            describe: 'Most/least expensive item on one order.',                 domain: 'orders', needsOrder: true },
+  order_includes_category:      { builder: b.orderIncludesCategory,       describe: 'Whether one order includes a given category (wine/liquor/...).', domain: 'orders', needsOrder: true },
+
+  // --- v5: customer drill-down + comparison ---------------------------
+  customer_last_order_items:    { builder: b.customerLastOrderItems,      describe: 'A customer\'s most recent order + its line items.',       domain: 'orders',    needsCustomer: true },
+  customer_last_n_orders:       { builder: b.customerLastNOrders,         describe: 'A customer\'s last N orders.',                             domain: 'orders',    needsCustomer: true },
+  customer_comparison:          { builder: b.customerComparison,          describe: 'Compare two resolved customers across spend/units/orders/AOV.', domain: 'customers', needsCustomerPair: true },
+  customer_time_series:         { builder: b.customerTimeSeries,          describe: 'Per-customer revenue/units/orders by day/week/month.',    domain: 'customers', needsCustomer: true },
+  customer_change_over_time:    { builder: b.customerChangeOverTime,      describe: 'Customer current window vs prior equal-length window.',   domain: 'customers', needsCustomer: true },
+  customer_color_mix:           { builder: b.customerColorMix,            describe: 'Red/white/sparkling mix for one customer.',                domain: 'customers', needsCustomer: true },
+
+  // --- v5: overlap share ----------------------------------------------
+  order_overlap_share:          { builder: b.orderOverlapShare,           describe: 'Share of orders containing BOTH listed categories.',      domain: 'orders' },
 };
 
 function get(intent) { return registry[intent] || null; }

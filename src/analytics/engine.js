@@ -174,6 +174,84 @@ async function answer(question) {
     }
   }
 
+  if (entry.needsOrder) {
+    try {
+      const ref = parsed.params.orderRef;
+      const r = await resolver.resolveOrder({ name: ref && ref.name, id: ref && ref.id });
+      if (r.status === 'not_found') {
+        return {
+          question,
+          intent: parsed.intent,
+          domain: entry.domain,
+          answer: `No order found matching "${(ref && (ref.name || ref.raw)) || '(none)'}".`,
+          data: [],
+          meta: { status: 'not_found', resolution: { order: r } },
+        };
+      }
+      plan.resolved.order = r.order;
+    } catch (e) {
+      return {
+        question,
+        intent: parsed.intent,
+        domain: entry.domain,
+        answer: `Order lookup failed: ${e.message}`,
+        data: [],
+        meta: { status: 'error', error: e.message },
+      };
+    }
+  }
+
+  if (entry.needsCustomerPair) {
+    try {
+      const pair = parsed.params.customerPair;
+      if (!pair) {
+        return {
+          question,
+          intent: parsed.intent,
+          domain: entry.domain,
+          answer: 'I need two customer names to compare (e.g., "compare Brian Hadfield with Chelsey Hadfield").',
+          data: [],
+          meta: { status: 'not_found' },
+        };
+      }
+      const [a, b] = await Promise.all([
+        resolver.resolveCustomer({ customer: pair.left,  email: null }),
+        resolver.resolveCustomer({ customer: pair.right, email: null }),
+      ]);
+      const partial = [];
+      if (a.status !== 'ok') partial.push({ side: 'left',  hint: pair.left,  result: a });
+      if (b.status !== 'ok') partial.push({ side: 'right', hint: pair.right, result: b });
+      if (partial.length) {
+        // Compose a single message describing each side.
+        const lines = partial.map((p) => {
+          if (p.result.status === 'ambiguous') {
+            const opts = p.result.candidates.slice(0, 5).map((c) => `${c.customer_name || c.email}`).join(', ');
+            return `${p.side === 'left' ? 'Left' : 'Right'} side "${p.hint}" is ambiguous: ${opts}`;
+          }
+          return `${p.side === 'left' ? 'Left' : 'Right'} side "${p.hint}" not found.`;
+        });
+        return {
+          question,
+          intent: parsed.intent,
+          domain: entry.domain,
+          answer: lines.join('\n'),
+          data: partial,
+          meta: { status: partial.some((p) => p.result.status === 'ambiguous') ? 'disambiguation' : 'not_found', resolution: { customerPair: partial } },
+        };
+      }
+      plan.resolved.customerPair = { left: a.customer, right: b.customer };
+    } catch (e) {
+      return {
+        question,
+        intent: parsed.intent,
+        domain: entry.domain,
+        answer: `Customer-pair lookup failed: ${e.message}`,
+        data: [],
+        meta: { status: 'error', error: e.message },
+      };
+    }
+  }
+
   if (entry.needsProduct) {
     try {
       const r = await resolver.resolveProduct({

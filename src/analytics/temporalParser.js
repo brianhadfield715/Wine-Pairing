@@ -240,6 +240,47 @@ function tryNamedMonth(q, now) {
   return { mode: 'window', sinceIso: toIsoUtc(s), untilIso: toIsoUtc(e), label: `${MONTHS[monthIdx]} ${year}`, grain: 'month' };
 }
 
+// ---- Anchored weeks ("week of 5/31/2026" / "week of June 7 2026") --------
+// A week is treated as the 7-day span starting at the given date.
+function _parseAnyDate(raw, now) {
+  const r1 = tryExactDateNumeric('on ' + raw);
+  if (r1 && !r1.error) return r1;
+  const r2 = tryExactDateIso('on ' + raw);
+  if (r2 && !r2.error) return r2;
+  const r3 = tryExactDateNamed('on ' + raw);
+  if (r3 && !r3.error) return r3;
+  return null;
+}
+
+function tryWeekOf(q, now) {
+  // "week of <date>" — date may be numeric (5/31/2026 / 2026-05-31) or named
+  // ("June 7 2026" / "June 7, 2026"). Prefer 4-digit year first so 2026 isn't
+  // truncated to "20".
+  const re = /\bweek\s+of\s+((?:\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2}))|(?:\d{4}-\d{2}-\d{2})|(?:(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}))/i;
+  const m = q.match(re);
+  if (!m) return null;
+  const d = _parseAnyDate(m[1], now);
+  if (!d) return null;
+  const start = new Date(d.sinceIso);
+  const end = addDays(start, 7);
+  return {
+    mode: 'window',
+    sinceIso: start.toISOString(),
+    untilIso: end.toISOString(),
+    label: `week of ${d.label}`,
+    grain: 'week',
+    days: 7,
+  };
+}
+
+function tryWeekBeforeLast(q, now) {
+  if (!/\bweek\s+before\s+last\b/.test(q)) return null;
+  const thisWk = startOfWeekLocal(now);
+  const s = addDays(thisWk, -14);
+  const e = addDays(s, 7);
+  return { mode: 'window', sinceIso: toIsoUtc(s), untilIso: toIsoUtc(e), label: 'week before last', grain: 'week', days: 7 };
+}
+
 function tryOnDayOfWeek(q, now) {
   // "on Sunday" → most recent past Sunday (single day).
   const m = q.match(/\bon\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
@@ -376,6 +417,10 @@ function tryBefore(q) {
 const HANDLERS = [
   tryAllTime,             // very explicit "all time" / "lifetime"
   tryBetween, trySince, tryBefore,
+  // Anchored week ("week of 5/31/2026") wins over plain exact-date so the
+  // date literal is interpreted as a 7-day window, not a single day.
+  tryWeekOf,
+  tryWeekBeforeLast,
   // Exact-date literals must run BEFORE the rolling / named-month handlers
   // so "1/25/2026" wins over a generic "yesterday" or "in May".
   tryExactDateNumeric, tryExactDateIso, tryExactDateNamed,
@@ -388,6 +433,31 @@ const HANDLERS = [
   tryQuarterNumber, tryNamedMonth,
   tryOnDayOfWeek, tryWeekend,
 ];
+
+// ---------------------------------------------------------------------------
+// Comparison-pair parsing: "week of A vs week of B", "<period> vs <period>",
+// "compare X to Y". Returns { timeframeA, timeframeB } when both anchors are
+// detected, otherwise null. Used by intentParser to power explicit
+// period-over-period comparisons with non-symmetric custom windows.
+// ---------------------------------------------------------------------------
+function parsePair(questionRaw, opts = {}) {
+  const now = opts.now || new Date();
+  const q = String(questionRaw || '').toLowerCase();
+
+  // 1) "compare <left> to <right>"  /  "<left> vs <right>"  /  "<left> versus <right>"
+  //    "compare <left> with <right>" — left side may follow "compare ", right side may follow "to|vs|with|versus|against".
+  const splitRe = /\s+(?:to|vs|versus|with|against)\s+/i;
+  // Drop leading "compare ", "how did ", "was ", etc.
+  const stripped = q.replace(/^(?:compare\s+|how\s+(?:did|do)\s+|was\s+|did\s+|were\s+|how\s+were\s+|how\s+much\s+)/i, '').trim();
+  const halves = stripped.split(splitRe);
+  if (halves.length !== 2) return null;
+  const [leftRaw, rightRaw] = halves.map((s) => s.trim().replace(/[?.!,;:]+$/g, ''));
+  const tfA = parse(leftRaw, { now });
+  const tfB = parse(rightRaw, { now });
+  // Both halves must resolve to concrete windows (not all_time).
+  if (!tfA || tfA.mode === 'all_time' || !tfB || tfB.mode === 'all_time') return null;
+  return { timeframeA: tfA, timeframeB: tfB };
+}
 
 // Time-series grain detector. Returns one of 'day' | 'week' | 'month' | null.
 function detectSeriesGrain(qLower) {
@@ -437,4 +507,4 @@ function withDefault(parsed, defaultDays) {
   };
 }
 
-module.exports = { parse, withDefault, detectSeriesGrain };
+module.exports = { parse, withDefault, detectSeriesGrain, parsePair };

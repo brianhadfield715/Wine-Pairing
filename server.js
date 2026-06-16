@@ -3,6 +3,15 @@ const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
 
+const db = require('./src/db');
+const analyticsEngine = require('./src/analytics/engine');
+const syncProductsMod  = require('./src/sync/products');
+const syncLocationsMod = require('./src/sync/locations');
+const syncInventoryMod = require('./src/sync/inventory');
+const syncCustomersMod = require('./src/sync/customers');
+const syncOrdersMod    = require('./src/sync/orders');
+const backfillMod      = require('./src/sync/backfill');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -10,6 +19,13 @@ app.use(express.json());
 const SHOP = process.env.SHOP_DOMAIN;
 const TOKEN = process.env.SHOPIFY_TOKEN;
 const API = `https://${SHOP}/admin/api/2024-10`;
+
+// ---------------------------------------------------------------------------
+// /recommend  (PUBLIC — DO NOT CHANGE BEHAVIOR)
+// ---------------------------------------------------------------------------
+// The wine-pairing recommender is the storefront-facing tool. It is kept
+// intentionally identical to the pre-refactor behavior to guarantee zero
+// regression. All helpers below are scoped to this route only.
 
 async function fetchAllWines() {
   const out = [];
@@ -162,6 +178,43 @@ function buildReason(profile, title, cat) {
   if (!bits.length) bits.push(`${cat} wine that fits the dish`);
   return `${title} — ${bits.join(', ')}.`;
 }
+
+// ---------------------------------------------------------------------------
+// Shared auth: Basic Auth via QA_USER / QA_PASS.
+// Reused for /shopify-qa AND /admin/sync/* to enforce the same protection.
+// ---------------------------------------------------------------------------
+
+function requireBasicAuth(req, res, next) {
+  const auth = req.headers.authorization || '';
+
+  if (!auth.startsWith('Basic ')) {
+    res.set('WWW-Authenticate', 'Basic realm="Shopify QA"');
+    return res.status(401).send('Authentication required');
+  }
+
+  const encoded = auth.split(' ')[1];
+  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  const idx = decoded.indexOf(':');
+  const user = idx >= 0 ? decoded.slice(0, idx) : decoded;
+  const pass = idx >= 0 ? decoded.slice(idx + 1) : '';
+
+  if (
+    user === process.env.QA_USER &&
+    pass === process.env.QA_PASS
+  ) {
+    return next();
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="Shopify QA"');
+  return res.status(401).send('Invalid credentials');
+}
+
+// ---------------------------------------------------------------------------
+// Legacy in-memory /shopify-qa helpers — kept ONLY as a no-DB fallback so the
+// route stays useful before the warehouse is provisioned. The DB-backed
+// analytics engine is preferred whenever DATABASE_URL is set.
+// ---------------------------------------------------------------------------
+
 function stripHtml(html) {
   return String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -222,23 +275,9 @@ function getWineColor(product) {
 function extractWineKeyword(question) {
   const q = question.toLowerCase();
   const patterns = [
-    'chardonnay',
-    'pinot noir',
-    'cabernet',
-    'merlot',
-    'sauvignon blanc',
-    'riesling',
-    'chenin',
-    'viognier',
-    'tempranillo',
-    'gamay',
-    'grenache',
-    'sparkling',
-    'rose',
-    'rosé',
-    'orange wine',
-    'white wine',
-    'red wine'
+    'chardonnay','pinot noir','cabernet','merlot','sauvignon blanc','riesling',
+    'chenin','viognier','tempranillo','gamay','grenache','sparkling','rose',
+    'rosé','orange wine','white wine','red wine'
   ];
   return patterns.find(p => q.includes(p)) || null;
 }
@@ -252,111 +291,64 @@ function extractDays(question, fallback = 30) {
   return fallback;
 }
 
-function answerInventoryQuestion(question, products) {
+function legacyInventoryAnswer(question, products) {
   const q = question.toLowerCase();
-
   if (/low stock/.test(q)) {
     const rows = [];
-    products.forEach(p => {
-      (p.variants || []).forEach(v => {
-        const qty = v.inventory_quantity || 0;
-        if (qty > 0 && qty <= 6) {
-          rows.push({
-            title: p.title,
-            sku: v.sku || '',
-            qty,
-            price: v.price
-          });
-        }
-      });
-    });
+    products.forEach(p => (p.variants || []).forEach(v => {
+      const qty = v.inventory_quantity || 0;
+      if (qty > 0 && qty <= 6) rows.push({ title: p.title, sku: v.sku || '', qty, price: v.price });
+    }));
     rows.sort((a, b) => a.qty - b.qty);
-    return {
-      answer: `Found ${rows.length} low-stock variants.`,
-      data: rows.slice(0, 20)
-    };
+    return { answer: `Found ${rows.length} low-stock variants.`, data: rows.slice(0, 20) };
   }
-
   if (/out of stock/.test(q)) {
     const rows = [];
-    products.forEach(p => {
-      (p.variants || []).forEach(v => {
-        const qty = v.inventory_quantity || 0;
-        if (qty <= 0) {
-          rows.push({
-            title: p.title,
-            sku: v.sku || '',
-            qty
-          });
-        }
-      });
-    });
-    return {
-      answer: `Found ${rows.length} out-of-stock variants.`,
-      data: rows.slice(0, 20)
-    };
+    products.forEach(p => (p.variants || []).forEach(v => {
+      const qty = v.inventory_quantity || 0;
+      if (qty <= 0) rows.push({ title: p.title, sku: v.sku || '', qty });
+    }));
+    return { answer: `Found ${rows.length} out-of-stock variants.`, data: rows.slice(0, 20) };
   }
-
   const wineKeyword = extractWineKeyword(q);
-
   if (/in stock/.test(q) || /under \$?\d+/.test(q) || /white|red|rose|rosé|sparkling|orange/.test(q)) {
     const budgetMatch = q.match(/under \$?(\d+)/);
     const budget = budgetMatch ? parseFloat(budgetMatch[1]) : null;
-
-    let rows = [];
+    const rows = [];
     products.forEach(p => {
       const color = getWineColor(p);
       const text = `${p.title} ${p.product_type || ''} ${p.tags || ''} ${stripHtml(p.body_html)}`.toLowerCase();
-
       if (wineKeyword && !text.includes(wineKeyword)) return;
       if (q.includes('white') && color !== 'white') return;
       if (q.includes('red') && color !== 'red') return;
       if (q.includes('sparkling') && color !== 'sparkling') return;
       if ((q.includes('rose') || q.includes('rosé')) && color !== 'rose') return;
       if (q.includes('orange') && color !== 'orange') return;
-
       (p.variants || []).forEach(v => {
         const qty = v.inventory_quantity || 0;
         const price = parseFloat(v.price || 0);
         if (qty <= 0) return;
         if (budget && price > budget) return;
-        rows.push({
-          title: p.title,
-          sku: v.sku || '',
-          qty,
-          price: v.price,
-          url: `https://${SHOP}/products/${p.handle}`
-        });
+        rows.push({ title: p.title, sku: v.sku || '', qty, price: v.price, url: `https://${SHOP}/products/${p.handle}` });
       });
     });
-
     rows.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
-    return {
-      answer: `Found ${rows.length} matching in-stock variants.`,
-      data: rows.slice(0, 20)
-    };
+    return { answer: `Found ${rows.length} matching in-stock variants.`, data: rows.slice(0, 20) };
   }
-
   return null;
 }
 
-function answerCustomerOrderQuestion(question, customers, orders) {
+function legacyCustomerOrderAnswer(question, customers, orders) {
   const q = question.toLowerCase();
   const wineKeyword = extractWineKeyword(q);
-
   if (/what orders came in/.test(q) || /orders yesterday/.test(q) || /orders last/.test(q)) {
     const rows = orders.map(o => ({
-      order: o.name,
-      created_at: o.created_at,
+      order: o.name, created_at: o.created_at,
       customer: o.customer ? `${o.customer.first_name || ''} ${o.customer.last_name || ''}`.trim() : '',
       total_price: o.total_price
     }));
-    return {
-      answer: `Found ${rows.length} matching orders.`,
-      data: rows.slice(0, 20)
-    };
+    return { answer: `Found ${rows.length} matching orders.`, data: rows.slice(0, 20) };
   }
-
   if ((/customers bought/.test(q) || /who bought/.test(q)) && wineKeyword) {
     const matched = [];
     orders.forEach(o => {
@@ -366,65 +358,45 @@ function answerCustomerOrderQuestion(question, customers, orders) {
       if (found && o.customer) {
         matched.push({
           customer: `${o.customer.first_name || ''} ${o.customer.last_name || ''}`.trim(),
-          email: o.customer.email || '',
-          order: o.name,
-          created_at: o.created_at
+          email: o.customer.email || '', order: o.name, created_at: o.created_at
         });
       }
     });
-
-    const unique = [];
-    const seen = new Set();
-    matched.forEach(r => {
-      const key = `${r.email}|${r.order}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        unique.push(r);
-      }
-    });
-
-    return {
-      answer: `Found ${unique.length} matching customer/order records for ${wineKeyword}.`,
-      data: unique.slice(0, 20)
-    };
+    const seen = new Set(); const unique = [];
+    matched.forEach(r => { const key = `${r.email}|${r.order}`; if (!seen.has(key)) { seen.add(key); unique.push(r); } });
+    return { answer: `Found ${unique.length} matching customer/order records for ${wineKeyword}.`, data: unique.slice(0, 20) };
   }
-
   if (/customer count|how many customers/.test(q)) {
     return {
       answer: `Found ${customers.length} customers in the fetched sample.`,
-      data: customers.slice(0, 10).map(c => ({
-        name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
-        email: c.email || ''
-      }))
+      data: customers.slice(0, 10).map(c => ({ name: `${c.first_name || ''} ${c.last_name || ''}`.trim(), email: c.email || '' }))
     };
   }
-
   return null;
 }
 
-function requireBasicAuth(req, res, next) {
-  const auth = req.headers.authorization || '';
-
-  if (!auth.startsWith('Basic ')) {
-    res.set('WWW-Authenticate', 'Basic realm="Shopify QA"');
-    return res.status(401).send('Authentication required');
-  }
-
-  const encoded = auth.split(' ')[1];
-  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-  const [user, pass] = decoded.split(':');
-
-  if (
-    user === process.env.QA_USER &&
-    pass === process.env.QA_PASS
-  ) {
-    return next();
-  }
-
-  res.set('WWW-Authenticate', 'Basic realm="Shopify QA"');
-  return res.status(401).send('Invalid credentials');
+async function legacyQaFallback(question) {
+  const q = question.toLowerCase();
+  const days = extractDays(q, 30);
+  const needOrders    = /order|bought|customer|yesterday|last week|last month|last \d+ day/.test(q);
+  const needCustomers = /customer|customers|buyer|buyers/.test(q);
+  const products = await fetchAllProducts();
+  const inv = legacyInventoryAnswer(q, products);
+  if (inv) return { question, domain: 'products_inventory', engine: 'legacy', ...inv };
+  const customers = needCustomers ? await fetchCustomers(250) : [];
+  const orders    = needOrders    ? await fetchOrders(days, 250) : [];
+  const co = legacyCustomerOrderAnswer(q, customers, orders);
+  if (co) return { question, domain: 'customers_orders', engine: 'legacy', ...co };
+  return {
+    question, domain: 'unknown', engine: 'legacy',
+    answer: 'I could not classify that question. Configure DATABASE_URL and run the warehouse sync to unlock the full analytics engine.',
+    data: []
+  };
 }
 
+// ---------------------------------------------------------------------------
+// /shopify-qa  (PROTECTED — DB-backed analytics with legacy fallback)
+// ---------------------------------------------------------------------------
 
 app.post('/shopify-qa', requireBasicAuth, async (req, res) => {
   try {
@@ -433,48 +405,75 @@ app.post('/shopify-qa', requireBasicAuth, async (req, res) => {
       return res.json({ answer: 'Ask a Shopify data question.', data: [] });
     }
 
-    const q = question.toLowerCase();
-    const days = extractDays(q, 30);
-
-    const needOrders = /order|bought|customer|yesterday|last week|last month|last \d+ day/.test(q);
-    const needCustomers = /customer|customers|buyer|buyers/.test(q);
-
-    const products = await fetchAllProducts();
-    const inventoryAnswer = answerInventoryQuestion(q, products);
-    if (inventoryAnswer) {
-      return res.json({
-        question,
-        domain: 'products_inventory',
-        answer: inventoryAnswer.answer,
-        data: inventoryAnswer.data
-      });
+    if (db.isEnabled()) {
+      try {
+        const result = await analyticsEngine.answer(question);
+        return res.json({ ...result, engine: 'db' });
+      } catch (e) {
+        // DB present but query failed (e.g. migrations not run yet). Fall
+        // through to legacy so the route stays useful, but report it.
+        console.error('[shopify-qa] analytics engine failed:', e.message);
+      }
     }
-
-    const customers = needCustomers ? await fetchCustomers(250) : [];
-    const orders = needOrders ? await fetchOrders(days, 250) : [];
-    const customerOrderAnswer = answerCustomerOrderQuestion(q, customers, orders);
-
-    if (customerOrderAnswer) {
-      return res.json({
-        question,
-        domain: 'customers_orders',
-        answer: customerOrderAnswer.answer,
-        data: customerOrderAnswer.data
-      });
-    }
-
-    return res.json({
-      question,
-      domain: 'unknown',
-      answer: 'I could not classify that question yet. Try asking about in-stock products, low stock, out-of-stock products, customers who bought a wine, or recent orders.',
-      data: []
-    });
+    const result = await legacyQaFallback(question);
+    return res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/health', (req, res) => res.json({ ok: true }));
+// ---------------------------------------------------------------------------
+// /admin/sync/*  (PROTECTED — same auth as /shopify-qa)
+// ---------------------------------------------------------------------------
+
+function requireDb(req, res, next) {
+  if (!db.isEnabled()) {
+    return res.status(503).json({ error: 'DATABASE_URL is not configured on this deployment.' });
+  }
+  next();
+}
+
+app.post('/admin/sync/products', requireBasicAuth, requireDb, async (req, res) => {
+  try { res.json({ ok: true, result: await syncProductsMod.syncProducts() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/admin/sync/locations', requireBasicAuth, requireDb, async (req, res) => {
+  try { res.json({ ok: true, result: await syncLocationsMod.syncLocations() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/admin/sync/inventory', requireBasicAuth, requireDb, async (req, res) => {
+  try { res.json({ ok: true, result: await syncInventoryMod.syncInventory(req.body || {}) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/admin/sync/customers', requireBasicAuth, requireDb, async (req, res) => {
+  try { res.json({ ok: true, result: await syncCustomersMod.syncCustomers(req.body || {}) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/admin/sync/orders', requireBasicAuth, requireDb, async (req, res) => {
+  try { res.json({ ok: true, result: await syncOrdersMod.syncOrders(req.body || {}) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/admin/sync/backfill', requireBasicAuth, requireDb, async (req, res) => {
+  try { res.json({ ok: true, result: await backfillMod.runBackfill(req.body || {}) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+
+app.get('/health', async (req, res) => {
+  const out = { ok: true, db: { enabled: db.isEnabled() } };
+  if (db.isEnabled()) {
+    out.db = { enabled: true, ...(await db.ping()) };
+  }
+  res.json(out);
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Wine pairing backend running on :${port}`));

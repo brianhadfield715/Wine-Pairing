@@ -237,10 +237,144 @@ const F = {
 
   sales_summary(rows, plan) {
     const r = rows[0] || {};
-    return `${(plan && plan.timeframe && plan.timeframe.label) || 'window'}: ${intish(r.orders)} orders, ${intish(r.units)} units, ${money(r.net_revenue)} net (${money(r.discounts)} in discounts).`;
+    const label = (plan && plan.timeframe && plan.timeframe.label) || 'window';
+    const niceLabel = label.charAt(0).toUpperCase() + label.slice(1);
+    const metric = plan && plan.params && plan.params.metric;
+    // Lead with the metric the user asked about; keep the others as context.
+    if (metric === 'units') {
+      return `${niceLabel} we sold ${intish(r.units)} units across ${intish(r.orders)} orders (net ${money(r.net_revenue)}).`;
+    }
+    if (metric === 'orders') {
+      return `${niceLabel} we had ${intish(r.orders)} orders (${intish(r.units)} units · net ${money(r.net_revenue)}).`;
+    }
+    if (metric === 'aov') {
+      return `${niceLabel} average order value: ${money(r.average_order_value)} (${intish(r.orders)} orders · net ${money(r.net_revenue)}).`;
+    }
+    // Default: revenue-led summary.
+    return `${niceLabel} we sold ${money(r.net_revenue)} across ${intish(r.orders)} orders and ${intish(r.units)} units. Average order value: ${money(r.average_order_value)}.`;
   },
 
   revenue_summary(rows, plan) { return F.sales_summary(rows, plan); },
+
+  // ----- new builders ----------------------------------------------------
+  top_customers_by_order_count(rows, plan) {
+    if (!rows.length) return 'No matching customers.';
+    const top = rows.slice(0, 5).map((r, i) =>
+      `${i + 1}. ${nameOrEmail(r)} — ${intish(r.order_count)} orders (${money(r.total_spend)})`
+    );
+    return `Most frequent customers${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  top_customers_by_aov(rows, plan) {
+    if (!rows.length) return 'No matching customers.';
+    const top = rows.slice(0, 5).map((r, i) =>
+      `${i + 1}. ${nameOrEmail(r)} — AOV ${money(r.average_order_value)} (${intish(r.order_count)} orders)`
+    );
+    return `Highest average order value${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  top_customers_by_sku(rows, plan) {
+    if (!rows.length) return `No buyers found for ${plan && plan.params && plan.params.sku || 'that SKU'}.`;
+    const top = rows.slice(0, 8).map((r, i) =>
+      `${i + 1}. ${nameOrEmail(r)} — ${intish(r.units)} units · ${money(r.spend)}`
+    );
+    const sku = plan && plan.params && plan.params.sku;
+    return `Top customers for ${sku || 'SKU'}${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  customers_bought_both(rows, plan) {
+    if (!rows.length) return 'No customers bought both.';
+    const top = rows.slice(0, 8).map((r) => `${nameOrEmail(r)} — ${money(r.total_spend)} lifetime`);
+    const [a, b] = (plan && plan.params && plan.params.twoVarietals) || ['A', 'B'];
+    return `Customers who bought both ${a} and ${b}${windowLabel(plan)} (${rows.length}):\n${top.join('\n')}`;
+  },
+
+  customer_top_varietals(rows, plan) {
+    if (!rows.length) return 'No purchase history.';
+    const top = rows.slice(0, 5).map((r, i) =>
+      `${i + 1}. ${r.product_title} — ${money(r.spend)} (${intish(r.units)} units)`
+    );
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    return `${who || 'Customer'} usually buys${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  customer_taste_profile(rows, plan) {
+    const r = rows[0] || {};
+    const who = r.customer_name || (plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name) || 'Customer';
+    const bits = [`${who} taste profile`];
+    if (r.favorite_vendor)         bits.push(`favorite vendor: ${r.favorite_vendor}`);
+    if (r.favorite_product_type)   bits.push(`favorite category: ${r.favorite_product_type}`);
+    if (r.favorite_product)        bits.push(`top product: ${r.favorite_product}`);
+    if (r.avg_unit_price != null)  bits.push(`typical price: ${money(r.avg_unit_price)} (${money(r.min_unit_price)}–${money(r.max_unit_price)})`);
+    if (r.last_order_at)           bits.push(`last order: ${shortDate(r.last_order_at)}`);
+    return bits.join(' · ');
+  },
+
+  customer_last_order(rows, plan) {
+    const r = rows[0] || {};
+    const who = r.customer_name || (plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name) || 'Customer';
+    if (!r.last_order_at) return `${who} has no recorded orders.`;
+    const days = r.days_since_last_order;
+    const status = days != null && days > 180 ? ' — likely inactive' : (days != null && days > 90 ? ' — slipping' : '');
+    return `${who} last shopped ${shortDate(r.last_order_at)} (${intish(days)} days ago${status}). Lifetime: ${money(r.total_spend)} across ${intish(r.order_count)} orders.`;
+  },
+
+  vendor_decline(rows, plan) {
+    if (!rows.length) return 'No vendor declines detected.';
+    const top = rows.slice(0, 5).map((r, i) => {
+      const pct = r.pct_change == null ? 'n/a' : `${r.pct_change > 0 ? '+' : ''}${r.pct_change}%`;
+      return `${i + 1}. ${r.vendor} — ${money(r.revenue_current)} (${pct}, was ${money(r.revenue_previous)})`;
+    });
+    return `Vendors down vs prior period${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  vendor_avg_selling_price(rows, plan) {
+    if (!rows.length) return 'No vendor pricing data.';
+    const top = rows.slice(0, 8).map((r, i) =>
+      `${i + 1}. ${r.vendor} — ASP ${money(r.avg_selling_price)} (${intish(r.units)} units, ${money(r.revenue)})`
+    );
+    return `Vendors by average selling price${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  vendors_dead_inventory(rows) {
+    if (!rows.length) return 'No vendor dead-inventory issues detected.';
+    const top = rows.slice(0, 8).map((r, i) =>
+      `${i + 1}. ${r.vendor} — ${intish(r.dead_skus)} SKUs · ${intish(r.dead_units)} units stuck`
+    );
+    return `Vendors with the most dead inventory:\n${top.join('\n')}`;
+  },
+
+  slow_moving(rows, plan) {
+    if (!rows.length) return 'No slow-moving SKUs match.';
+    const slow = plan && plan.params && plan.params.slow;
+    const tag = slow ? `< ${slow.maxUnits} units in ${slow.days}d` : 'slow';
+    const top = rows.slice(0, 8).map((r) => {
+      const sold = r.units_sold_30d != null ? r.units_sold_30d : r.units_sold_window;
+      return `${r.product_title} (${r.sku}) — sold ${intish(sold)}, on hand ${intish(r.on_hand)}`;
+    });
+    return `Slow movers (${tag}) — ${rows.length}:\n${top.join('\n')}`;
+  },
+
+  sku_inventory(rows, plan) {
+    if (!rows.length) return `No inventory found for ${plan && plan.params && plan.params.sku || 'that SKU'}.`;
+    const lines = rows.map((r) =>
+      `${r.product_title} (${r.sku}${r.variant_title ? ' · ' + r.variant_title : ''}) — ${intish(r.on_hand)} on hand @ ${money(r.price)} [${r.product_status || 'active'}]`
+    );
+    return `Inventory for ${plan && plan.params && plan.params.sku}:\n${lines.join('\n')}`;
+  },
+
+  sku_avg_price(rows, plan) {
+    const r = rows[0] || {};
+    if (!r.units_sold) return `No sales found for ${plan && plan.params && plan.params.sku || 'that SKU'}.`;
+    return `${r.product_title || r.sku}: avg selling price ${money(r.avg_unit_price)} (range ${money(r.min_unit_price)}–${money(r.max_unit_price)}) across ${intish(r.units_sold)} units${windowLabel(plan)}.`;
+  },
+
+  sku_last_sold(rows) {
+    const r = rows[0] || {};
+    if (!r.sku) return 'SKU not found in sales history.';
+    if (!r.last_sold_at) return `${r.product_title || r.sku} has never sold (lifetime units: ${intish(r.units_sold)}).`;
+    return `${r.product_title || r.sku} last sold ${shortDate(r.last_sold_at)}. Lifetime ${intish(r.units_sold)} units · 30d ${intish(r.units_sold_30d)} · on hand ${intish(r.on_hand)}.`;
+  },
 
   // -------- inventory -----------------------------------------------------
   low_stock(rows) {

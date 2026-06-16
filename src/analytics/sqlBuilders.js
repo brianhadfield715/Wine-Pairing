@@ -176,6 +176,17 @@ function customersWhoBought(p) {
     values.push(`%${p.vendor}%`);
     filters.push(`lower(fs.vendor) like lower($${i++})`);
   }
+  if (p.category) {
+    values.push(`%${p.category}%`);
+    filters.push(`(lower(fs.product_title) like lower($${i}) or lower(fs.variant_title) like lower($${i}))`);
+    i++;
+  }
+  // Price-band filter: "premium" => unit price > N; "under $25" => < N.
+  if (p.money) {
+    if (p.money.op === '<') { values.push(p.money.value); filters.push(`fs.unit_price < $${i++}`); }
+    else if (p.money.op === '>') { values.push(p.money.value); filters.push(`fs.unit_price > $${i++}`); }
+    else if (p.money.op === 'between') { values.push(p.money.min, p.money.max); filters.push(`fs.unit_price between $${i++} and $${i++}`); }
+  }
   values.push(limit);
   const where = filters.length ? `where ${filters.join(' and ')}` : '';
   const text = `
@@ -221,7 +232,11 @@ function newCustomers(p) {
 }
 
 function lapsedCustomers(p) {
-  const minDays = (p.timeframe && p.timeframe.days) || 180;
+  // Priority for the lapsed-cutoff:
+  //   1. explicit "not purchased in N days" → p.lapsedDays
+  //   2. timeframe width (e.g. "in the last 60 days")
+  //   3. default 180 days
+  const minDays = p.lapsedDays || (p.timeframe && p.timeframe.days) || 180;
   const text = `
     select customer_id, email, customer_name, total_spend, order_count,
            last_order_at, days_since_last_order
@@ -231,7 +246,7 @@ function lapsedCustomers(p) {
      order by total_spend desc
      limit $2
   `;
-  return { text, values: [minDays, p.limit || 25], meta: { domain: 'customers' } };
+  return { text, values: [minDays, p.limit || 25], meta: { domain: 'customers', lapsed_days: minDays } };
 }
 
 function customersOneTimeOnly(p) {
@@ -312,6 +327,15 @@ function topCustomersByVendor(p) {
 
 function basketPairs(p = {}) {
   const limit = p.limit || 20;
+  // Honor timeframe by filtering on the parent order's created_at.
+  const w = windowFragments('o.created_at', p.timeframe, 1);
+  const filters = [
+    `o.cancelled_at is null`,
+    `a.product_id is not null`,
+    `b.product_id is not null`,
+    ...w.fragments,
+  ];
+  const values = [...w.values, limit];
   const text = `
     select
       a.title as product_a,
@@ -322,14 +346,12 @@ function basketPairs(p = {}) {
       on a.order_id = b.order_id
      and a.product_id < b.product_id
     join orders o on o.id = a.order_id
-    where o.cancelled_at is null
-      and a.product_id is not null
-      and b.product_id is not null
+    where ${filters.join(' and ')}
     group by a.title, b.title
     order by times_bought_together desc
-    limit $1
+    limit $${w.nextIdx}
   `;
-  return { text, values: [limit], meta: { domain: 'orders' } };
+  return { text, values, meta: { domain: 'orders' } };
 }
 
 function boughtWithProduct(p) {
@@ -655,22 +677,28 @@ function recentOrders(p) {
 }
 
 function salesSummary(p) {
-  const tf = (p.timeframe && p.timeframe.mode !== 'all_time')
-    ? p.timeframe
-    : { mode: 'window', sinceIso: new Date(Date.now() - 30 * 86400e3).toISOString(), untilIso: new Date().toISOString(), days: 30 };
+  // For all_time we DO want to honor it (return cumulative totals); only
+  // fall back to "last 30 days" when no temporal phrase was detected at
+  // all (the parser already labels that as all_time, so we treat truly
+  // absent temporal phrases by checking the question — engine sets
+  // `p.timeframe` directly).
+  const tf = p.timeframe || { mode: 'all_time', label: 'all time' };
   const w = windowFragments('occurred_at', tf, 1);
   const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
   const text = `
     select
-      count(distinct order_id)            as orders,
-      coalesce(sum(quantity), 0)::int     as units,
-      coalesce(sum(net_revenue), 0)::numeric(14,2)   as net_revenue,
-      coalesce(sum(gross_revenue), 0)::numeric(14,2) as gross_revenue,
-      coalesce(sum(line_discount), 0)::numeric(14,2) as discounts
+      count(distinct order_id)::int                       as orders,
+      coalesce(sum(quantity), 0)::int                     as units,
+      coalesce(sum(net_revenue), 0)::numeric(14,2)        as net_revenue,
+      coalesce(sum(gross_revenue), 0)::numeric(14,2)      as gross_revenue,
+      coalesce(sum(line_discount), 0)::numeric(14,2)      as discounts,
+      case when count(distinct order_id) > 0
+           then (sum(net_revenue) / count(distinct order_id))::numeric(14,2)
+           else 0 end                                      as average_order_value
       from fact_sales
      ${where}
   `;
-  return { text, values: w.values, meta: { domain: 'revenue', timeframe: tf } };
+  return { text, values: w.values, meta: { domain: 'revenue', timeframe: tf, metric: p.metric || 'revenue' } };
 }
 
 // ---------------------------------------------------------------------------
@@ -738,16 +766,33 @@ function inStockFiltered(p) {
 }
 
 function deadInventory(p) {
-  const days = (p.timeframe && p.timeframe.days) || 180;
+  // Days come from explicit "...in N days" capture first, then the
+  // timeframe width, then a sane default.
+  const days = p.dayCount || (p.timeframe && p.timeframe.days) || 90;
+  const filters = [
+    `on_hand > 0`,
+    `(last_sold_at is null or last_sold_at < now() - ($1 || ' days')::interval)`,
+  ];
+  const values = [String(days)];
+  let i = 2;
+  if (p.vendor) {
+    values.push(`%${p.vendor}%`);
+    filters.push(`lower(coalesce(vendor,'')) like lower($${i++})`);
+  }
+  if (p.color || p.varietal) {
+    values.push(`%${p.color || p.varietal}%`);
+    filters.push(`lower(coalesce(product_title,'')) like lower($${i++})`);
+  }
+  values.push(p.limit || 25);
   const text = `
-    select sku, product_title, vendor, on_hand, units_sold, last_sold_at
+    select sku, product_title, vendor, on_hand, units_sold,
+           units_sold_30d, units_sold_90d, last_sold_at
       from dim_sku_profile
-     where on_hand > 0
-       and (last_sold_at is null or last_sold_at < now() - ($1 || ' days')::interval)
+     where ${filters.join(' and ')}
      order by on_hand desc, sku asc
-     limit $2
+     limit $${i}
   `;
-  return { text, values: [String(days), p.limit || 25], meta: { domain: 'inventory' } };
+  return { text, values, meta: { domain: 'inventory', days } };
 }
 
 function unsoldInPeriod(p) {
@@ -832,6 +877,398 @@ function lowStockHighVelocity(p) {
   return { text, values: [threshold, minSales, p.limit || 25], meta: { domain: 'inventory' } };
 }
 
+// ---------------------------------------------------------------------------
+// NEW BUILDERS for the expanded language coverage
+// ---------------------------------------------------------------------------
+
+// Top spenders ranked by ORDER COUNT (recurring customers).
+function topCustomersByOrderCount(p) {
+  const limit = p.limit || 10;
+  const tf = p.timeframe;
+  if (tf && tf.mode === 'window') {
+    const w = windowFragments('fs.occurred_at', tf, 1);
+    const values = [...w.values, limit];
+    const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+    const text = `
+      select fs.customer_id,
+             max(c.email)                                                            as email,
+             max(trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')))  as customer_name,
+             count(distinct fs.order_id)::int                                        as order_count,
+             sum(fs.net_revenue)::numeric(14,2)                                      as total_spend
+        from fact_sales fs
+        left join customers c on c.id = fs.customer_id
+       ${where}
+       group by fs.customer_id
+       order by order_count desc nulls last
+       limit $${w.nextIdx}
+    `;
+    return { text, values, meta: { domain: 'customers' } };
+  }
+  const text = `
+    select customer_id, email, customer_name, order_count, total_spend, last_order_at
+      from dim_customer_profile
+     where order_count > 0
+     order by order_count desc nulls last
+     limit $1
+  `;
+  return { text, values: [limit], meta: { domain: 'customers' } };
+}
+
+// Top spenders ranked by AVERAGE ORDER VALUE.
+function topCustomersByAov(p) {
+  const limit = p.limit || 10;
+  const tf = p.timeframe;
+  if (tf && tf.mode === 'window') {
+    const w = windowFragments('fs.occurred_at', tf, 1);
+    const values = [...w.values, limit];
+    const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+    const text = `
+      with per_order as (
+        select fs.customer_id, fs.order_id, sum(fs.net_revenue) as order_total
+          from fact_sales fs
+         ${where}
+         group by fs.customer_id, fs.order_id
+      )
+      select po.customer_id,
+             max(c.email)                                                            as email,
+             max(trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')))  as customer_name,
+             count(*)::int                                                            as order_count,
+             sum(po.order_total)::numeric(14,2)                                       as total_spend,
+             avg(po.order_total)::numeric(14,2)                                       as average_order_value
+        from per_order po
+        left join customers c on c.id = po.customer_id
+       group by po.customer_id
+      having count(*) >= 2
+       order by average_order_value desc nulls last
+       limit $${w.nextIdx}
+    `;
+    return { text, values, meta: { domain: 'customers' } };
+  }
+  const text = `
+    select customer_id, email, customer_name, order_count, total_spend,
+           case when order_count > 0
+                then (total_spend / order_count)::numeric(14,2)
+                else 0 end as average_order_value
+      from dim_customer_profile
+     where order_count >= 2
+     order by average_order_value desc nulls last
+     limit $1
+  `;
+  return { text, values: [limit], meta: { domain: 'customers' } };
+}
+
+// Top customers for a specific SKU.
+function topCustomersBySku(p) {
+  const sku = (p.sku || '').toString();
+  if (!sku) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const w = windowFragments('fs.occurred_at', p.timeframe, 2);
+  const values = [sku, ...w.values, p.limit || 10];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select fs.customer_id,
+           max(c.email)                                                            as email,
+           max(trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')))  as customer_name,
+           sum(fs.quantity)::int                                                   as units,
+           sum(fs.net_revenue)::numeric(14,2)                                      as spend
+      from fact_sales fs
+      left join customers c on c.id = fs.customer_id
+     where fs.sku = $1 ${where}
+     group by fs.customer_id
+     order by units desc, spend desc
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+// Customers who bought BOTH varietal X AND varietal Y in the window.
+function customersBoughtBoth(p) {
+  const [vA, vB] = p.twoVarietals || ['', ''];
+  if (!vA || !vB) {
+    return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  }
+  const w = windowFragments('fs.occurred_at', p.timeframe, 3);
+  const values = [`%${vA}%`, `%${vB}%`, ...w.values, p.limit || 25];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    with cust_a as (
+      select distinct fs.customer_id from fact_sales fs
+       where lower(fs.product_title) like lower($1) ${where}
+    ),
+    cust_b as (
+      select distinct fs.customer_id from fact_sales fs
+       where lower(fs.product_title) like lower($2) ${where}
+    )
+    select cust_a.customer_id,
+           c.email,
+           trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) as customer_name,
+           dim.total_spend, dim.order_count
+      from cust_a
+      join cust_b using (customer_id)
+      left join customers c on c.id = cust_a.customer_id
+      left join dim_customer_profile dim on dim.customer_id = cust_a.customer_id
+     where cust_a.customer_id is not null
+     order by dim.total_spend desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+// Top varietals for one customer (favorite varietal proxy via title match).
+function customerTopVarietals(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const w = windowFragments('fs.occurred_at', p.timeframe, 2);
+  const values = [cid, ...w.values, p.limit || 10];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select fs.product_title,
+           sum(fs.quantity)::int               as units,
+           sum(fs.net_revenue)::numeric(14,2)  as spend,
+           count(distinct fs.order_id)         as orders
+      from fact_sales fs
+     where fs.customer_id = $1 ${where}
+     group by fs.product_title
+     order by spend desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+// One-row taste profile: favorite vendor + favorite category + typical price.
+function customerTasteProfile(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const text = `
+    with v as (
+      select vendor, sum(net_revenue) as rev
+        from fact_sales where customer_id = $1 and vendor is not null
+       group by vendor order by rev desc limit 1
+    ),
+    t as (
+      select product_title, sum(net_revenue) as rev
+        from fact_sales where customer_id = $1
+       group by product_title order by rev desc limit 1
+    ),
+    p as (
+      select avg(unit_price)::numeric(12,2) as avg_unit_price,
+             min(unit_price) as min_price,
+             max(unit_price) as max_price
+        from fact_sales where customer_id = $1
+    )
+    select
+      (select vendor from v)         as favorite_vendor,
+      (select product_title from t)  as favorite_product,
+      (select avg_unit_price from p) as avg_unit_price,
+      (select min_price from p)      as min_unit_price,
+      (select max_price from p)      as max_unit_price,
+      (select customer_name from dim_customer_profile where customer_id = $1) as customer_name,
+      (select favorite_product_type from dim_customer_profile where customer_id = $1) as favorite_product_type,
+      (select last_order_at from dim_customer_profile where customer_id = $1) as last_order_at
+  `;
+  return { text, values: [cid], meta: { domain: 'customers' } };
+}
+
+// When did the customer last shop with us?
+function customerLastOrder(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const text = `
+    select
+      customer_id,
+      customer_name,
+      email,
+      last_order_at,
+      days_since_last_order,
+      order_count,
+      total_spend
+    from dim_customer_profile
+    where customer_id = $1
+  `;
+  return { text, values: [cid], meta: { domain: 'customers' } };
+}
+
+// SKU inventory snapshot for one SKU.
+function skuInventory(p) {
+  if (!p.sku) return { text: 'select null where false', values: [], meta: { domain: 'inventory' } };
+  const text = `
+    select sku, product_title, variant_title, vendor, price, on_hand,
+           product_handle, product_status
+      from vw_current_inventory
+     where sku = $1
+     order by variant_title nulls last
+  `;
+  return { text, values: [p.sku], meta: { domain: 'inventory' } };
+}
+
+// Average selling price for one SKU.
+function skuAvgPrice(p) {
+  if (!p.sku) return { text: 'select null where false', values: [], meta: { domain: 'sales' } };
+  const w = windowFragments('fs.occurred_at', p.timeframe, 2);
+  const values = [p.sku, ...w.values];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      $1::text                                              as sku,
+      max(fs.product_title)                                 as product_title,
+      count(*)::int                                         as line_items,
+      sum(fs.quantity)::int                                 as units_sold,
+      sum(fs.net_revenue)::numeric(14,2)                    as net_revenue,
+      avg(fs.unit_price)::numeric(12,2)                     as avg_unit_price,
+      min(fs.unit_price)                                    as min_unit_price,
+      max(fs.unit_price)                                    as max_unit_price
+      from fact_sales fs
+     where fs.sku = $1 ${where}
+  `;
+  return { text, values, meta: { domain: 'sales' } };
+}
+
+// When was the SKU last sold?
+function skuLastSold(p) {
+  if (!p.sku) return { text: 'select null where false', values: [], meta: { domain: 'sales' } };
+  const text = `
+    select sku, product_title, last_sold_at,
+           units_sold, units_sold_30d, units_sold_90d, on_hand
+      from dim_sku_profile
+     where sku = $1
+     limit 1
+  `;
+  return { text, values: [p.sku], meta: { domain: 'sales' } };
+}
+
+// Slow-movers: "sold fewer than N units in the last M days".
+function slowMoving(p) {
+  const slow = p.slow || { maxUnits: 3, days: 30 };
+  const days = slow.days;
+  const cap = slow.maxUnits;
+  // dim_sku_profile gives 30d and 90d windows; if user asks for a different
+  // window we approximate by running against fact_sales.
+  if (days === 30) {
+    const text = `
+      select sku, product_title, vendor, on_hand, units_sold_30d, units_sold_90d, last_sold_at
+        from dim_sku_profile
+       where on_hand > 0
+         and coalesce(units_sold_30d, 0) < $1
+       order by units_sold_30d asc nulls first, on_hand desc
+       limit $2
+    `;
+    return { text, values: [cap, p.limit || 25], meta: { domain: 'inventory', days } };
+  }
+  // General window via fact_sales.
+  const sinceIso = new Date(Date.now() - days * 86400e3).toISOString();
+  const text = `
+    with sold as (
+      select sku, sum(quantity) as units
+        from fact_sales
+       where occurred_at >= $1::timestamptz and sku <> ''
+       group by sku
+    )
+    select v.sku, v.product_title, v.vendor, v.on_hand,
+           coalesce(s.units, 0)::int as units_sold_window,
+           v.product_status
+      from vw_current_inventory v
+      left join sold s on s.sku = v.sku
+     where v.on_hand > 0
+       and coalesce(s.units, 0) < $2
+     order by units_sold_window asc, v.on_hand desc
+     limit $3
+  `;
+  return { text, values: [sinceIso, cap, p.limit || 25], meta: { domain: 'inventory', days } };
+}
+
+// Vendors with the most dead inventory.
+function vendorsDeadInventory(p) {
+  const days = p.dayCount || (p.timeframe && p.timeframe.days) || 90;
+  const text = `
+    select coalesce(nullif(vendor,''), '(unknown)') as vendor,
+           count(*)::int                            as dead_skus,
+           sum(on_hand)::int                        as dead_units
+      from dim_sku_profile
+     where on_hand > 0
+       and (last_sold_at is null or last_sold_at < now() - ($1 || ' days')::interval)
+     group by 1
+     order by dead_units desc nulls last
+     limit $2
+  `;
+  return { text, values: [String(days), p.limit || 10], meta: { domain: 'vendors', days } };
+}
+
+// Vendor average selling price.
+function vendorAvgSellingPrice(p) {
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const values = [...w.values, p.limit || 10];
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select coalesce(nullif(fs.vendor,''), '(unknown)') as vendor,
+           sum(fs.quantity)::int                       as units,
+           sum(fs.net_revenue)::numeric(14,2)          as revenue,
+           case when sum(fs.quantity) > 0
+                then (sum(fs.net_revenue) / sum(fs.quantity))::numeric(12,2)
+                else 0 end                              as avg_selling_price
+      from fact_sales fs
+     ${where}
+     group by 1
+    having sum(fs.quantity) >= 5
+     order by avg_selling_price desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'vendors' } };
+}
+
+// Vendor decline: same shape as vendorGrowth but sorted ascending so the
+// biggest losers are at the top.
+function vendorDecline(p) {
+  // Reuse the vendorGrowth shape so the formatter doesn't need to branch.
+  let tf = p.timeframe;
+  if (!tf || tf.mode !== 'window') {
+    const now = new Date();
+    tf = {
+      mode: 'window',
+      sinceIso: new Date(now - 30 * 86400e3).toISOString(),
+      untilIso: now.toISOString(),
+      days: 30,
+    };
+  }
+  const widthMs = new Date(tf.untilIso) - new Date(tf.sinceIso);
+  const priorSince = new Date(new Date(tf.sinceIso).getTime() - widthMs).toISOString();
+  const priorUntil = tf.sinceIso;
+  const text = `
+    with cur as (
+      select coalesce(nullif(vendor,''), '(unknown)') as vendor,
+             sum(net_revenue)::numeric(14,2) as revenue,
+             sum(quantity)::int              as units
+        from fact_sales
+       where occurred_at >= $1::timestamptz and occurred_at < $2::timestamptz
+       group by 1
+    ),
+    prev as (
+      select coalesce(nullif(vendor,''), '(unknown)') as vendor,
+             sum(net_revenue)::numeric(14,2) as revenue,
+             sum(quantity)::int              as units
+        from fact_sales
+       where occurred_at >= $3::timestamptz and occurred_at < $4::timestamptz
+       group by 1
+    )
+    select coalesce(cur.vendor, prev.vendor) as vendor,
+           coalesce(cur.revenue, 0)  as revenue_current,
+           coalesce(prev.revenue, 0) as revenue_previous,
+           (coalesce(cur.revenue, 0) - coalesce(prev.revenue, 0))::numeric(14,2) as revenue_delta,
+           case when coalesce(prev.revenue, 0) = 0 then null
+                else round(
+                  ((coalesce(cur.revenue, 0) - prev.revenue) / prev.revenue) * 100,
+                  1
+                ) end as pct_change
+      from cur full outer join prev on prev.vendor = cur.vendor
+     where coalesce(prev.revenue, 0) > 0
+     order by revenue_delta asc nulls last
+     limit $5
+  `;
+  return {
+    text,
+    values: [tf.sinceIso, tf.untilIso, priorSince, priorUntil, p.limit || 10],
+    meta: { domain: 'vendors', window_current: { sinceIso: tf.sinceIso, untilIso: tf.untilIso }, window_previous: { sinceIso: priorSince, untilIso: priorUntil } },
+  };
+}
+
 module.exports = {
   // customers
   topCustomersBySpend,
@@ -847,6 +1284,13 @@ module.exports = {
   customersOneTimeOnly,
   topCustomersByVarietal,
   topCustomersByVendor,
+  topCustomersByOrderCount,
+  topCustomersByAov,
+  topCustomersBySku,
+  customersBoughtBoth,
+  customerTopVarietals,
+  customerTasteProfile,
+  customerLastOrder,
   // basket
   basketPairs,
   boughtWithProduct,
@@ -857,6 +1301,9 @@ module.exports = {
   productDetail,
   topVendors,
   vendorGrowth,
+  vendorDecline,
+  vendorAvgSellingPrice,
+  vendorsDeadInventory,
   categoryPerformance,
   varietalPerformance,
   periodOverPeriod,
@@ -864,6 +1311,9 @@ module.exports = {
   trendingDown,
   recentOrders,
   salesSummary,
+  skuInventory,
+  skuAvgPrice,
+  skuLastSold,
   // inventory
   lowStock,
   outOfStock,
@@ -876,4 +1326,5 @@ module.exports = {
   inventoryVelocity,
   sellThrough,
   lowStockHighVelocity,
+  slowMoving,
 };

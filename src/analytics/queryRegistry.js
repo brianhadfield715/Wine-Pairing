@@ -20,6 +20,13 @@ const registry = {
   customers_one_time_only:   { builder: b.customersOneTimeOnly,  describe: 'Customers with exactly one order.', domain: 'customers' },
   top_customers_by_varietal: { builder: b.topCustomersByVarietal, describe: 'Top spenders on a varietal in window.', domain: 'customers' },
   top_customers_by_vendor:   { builder: b.topCustomersByVendor,   describe: 'Top spenders for a vendor in window.', domain: 'customers' },
+  top_customers_by_sku:        { builder: b.topCustomersBySku,        describe: 'Top buyers of a specific SKU.', domain: 'customers' },
+  top_customers_by_order_count:{ builder: b.topCustomersByOrderCount, describe: 'Customers ranked by order count (most frequent).', domain: 'customers' },
+  top_customers_by_aov:        { builder: b.topCustomersByAov,        describe: 'Customers ranked by average order value.', domain: 'customers' },
+  customers_bought_both:       { builder: b.customersBoughtBoth,      describe: 'Customers who bought BOTH varietal A and B in window.', domain: 'customers' },
+  customer_top_varietals:      { builder: b.customerTopVarietals,     describe: 'What one customer typically buys.', domain: 'customers', needsCustomer: true },
+  customer_taste_profile:      { builder: b.customerTasteProfile,     describe: 'Favorite vendor / product / typical price for one customer.', domain: 'customers', needsCustomer: true },
+  customer_last_order:         { builder: b.customerLastOrder,        describe: 'When did one customer last shop.', domain: 'customers', needsCustomer: true },
 
   // --- Basket / affinity -----------------------------------------------
   basket_pairs:         { builder: b.basketPairs,        describe: 'Products purchased together in the same order.', domain: 'orders' },
@@ -34,6 +41,9 @@ const registry = {
   product_detail:       { builder: b.productDetail,      describe: 'Product detail / lifetime + window aggregates.', domain: 'sales' },
   top_vendors:          { builder: b.topVendors,         describe: 'Top vendors by revenue in window.', domain: 'vendors' },
   vendor_growth:        { builder: b.vendorGrowth,       describe: 'Vendor revenue change vs prior equal-length window.', domain: 'vendors' },
+  vendor_decline:       { builder: b.vendorDecline,      describe: 'Vendors with the biggest revenue declines vs prior window.', domain: 'vendors' },
+  vendor_avg_selling_price: { builder: b.vendorAvgSellingPrice, describe: 'Vendors ranked by average selling price.', domain: 'vendors' },
+  vendors_dead_inventory:   { builder: b.vendorsDeadInventory,    describe: 'Vendors with the most dead/unsold inventory.', domain: 'vendors' },
   category_performance: { builder: b.categoryPerformance, describe: 'Product type / category performance in window.', domain: 'sales' },
   varietal_performance: { builder: b.varietalPerformance, describe: 'Varietal performance in window.', domain: 'sales' },
   period_over_period:   { builder: b.periodOverPeriod,   describe: 'Revenue/units/orders vs prior equal-length window.', domain: 'sales' },
@@ -56,6 +66,10 @@ const registry = {
   inventory_velocity:      { builder: b.inventoryVelocity,    describe: 'SKUs ranked by 30-day units velocity.', domain: 'inventory' },
   sell_through:            { builder: b.sellThrough,          describe: 'Sell-through ratio per SKU (30 days).', domain: 'inventory' },
   low_stock_high_velocity: { builder: b.lowStockHighVelocity, describe: 'Low on-hand SKUs still selling — reorder candidates.', domain: 'inventory' },
+  slow_moving:             { builder: b.slowMoving,           describe: 'SKUs that sold fewer than N units in a window.', domain: 'inventory' },
+  sku_inventory:           { builder: b.skuInventory,         describe: 'Inventory snapshot for a single SKU.', domain: 'inventory' },
+  sku_avg_price:           { builder: b.skuAvgPrice,          describe: 'Average / min / max selling price for a SKU.', domain: 'sales' },
+  sku_last_sold:           { builder: b.skuLastSold,          describe: 'When was a given SKU last sold.', domain: 'sales' },
 };
 
 function get(intent) { return registry[intent] || null; }

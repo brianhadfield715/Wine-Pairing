@@ -126,21 +126,42 @@ function extractVendor(q) {
 
 function extractSku(raw) {
   if (!raw) return null;
-  const m1 = raw.match(/\bsku[: ]+([A-Za-z0-9\-]+)/i);
+  // 1) Explicit "SKU XYZ" or "sku: XYZ" form.
+  const m1 = raw.match(/\bsku[: ]+([A-Za-z0-9\-]{3,40})/i);
   if (m1) return m1[1];
-  // Capitalized alphanumeric with dash, 4+ chars.
+  // 2) Capitalized alphanumeric with a dash (legacy shape).
   const m2 = raw.match(/\b([A-Z][A-Z0-9]+\-[A-Z0-9\-]{1,30})\b/);
   if (m2) return m2[1];
+  // 3) Bare alphanumeric token after the word "SKU" (e.g. "SKU DTALPG22").
+  //    Already covered by m1 because the SKU keyword is required for the
+  //    bare form (otherwise random words like "WINE2026" would be misread).
+  // 4) All-digits long codes ("50082043") when preceded by SKU/item/product.
+  const m4 = raw.match(/\b(?:sku|item|product)[\s#:]+(\d{4,})/i);
+  if (m4) return m4[1];
   return null;
 }
 
 function extractMoneyThreshold(q) {
+  // $ prefix is optional. Catch both literal "$25" and "25 dollars".
   const m = q.match(/under\s+\$?(\d+(?:\.\d+)?)/);
   if (m) return { op: '<', value: parseFloat(m[1]) };
   const m2 = q.match(/over\s+\$?(\d+(?:\.\d+)?)/);
   if (m2) return { op: '>', value: parseFloat(m2[1]) };
   const m3 = q.match(/between\s+\$?(\d+(?:\.\d+)?)\s+and\s+\$?(\d+(?:\.\d+)?)/);
   if (m3) return { op: 'between', min: parseFloat(m3[1]), max: parseFloat(m3[2]) };
+  // "less than $25" / "more than $100" / "above $50" / "below $30"
+  const lt = q.match(/(?:less\s+than|below|cheaper\s+than)\s+\$?(\d+(?:\.\d+)?)/);
+  if (lt) return { op: '<', value: parseFloat(lt[1]) };
+  const gt = q.match(/(?:more\s+than|above|pricier\s+than|premium|over)\s+\$?(\d+(?:\.\d+)?)/);
+  if (gt) return { op: '>', value: parseFloat(gt[1]) };
+  return null;
+}
+
+// "fewer than 6 units left", "less than 3 units", "below 10 units" — these
+// are about *quantity*, not price. Returned as { op:'<', value:N }.
+function extractUnitThreshold(q) {
+  const m = q.match(/(?:fewer\s+than|less\s+than|below|under)\s+(\d+)\s+(?:units?|bottles?|cases?|items?)\s*(?:left|on\s+hand|in\s+stock)?/);
+  if (m) return { op: '<', value: parseInt(m[1], 10) };
   return null;
 }
 
@@ -153,9 +174,41 @@ function extractLimit(q) {
 }
 
 function extractMetric(q) {
-  if (/\brevenue|\bsales?\b|\bdollars?\b|\$\d|\bmoney\b/.test(q)) return 'revenue';
-  if (/\bunits?\b|\bbottles?\b|\bcases?\b|\bcount\b|\bsold\b/.test(q)) return 'units';
+  // Order matters: "average order value" wins over generic "orders" and
+  // generic "revenue".
+  if (/\baverage\s+order\s+value|\baov\b|\bavg\s+order\b/.test(q)) return 'aov';
+  if (/\bhow\s+many\s+orders|\border\s+count\b|\bnumber\s+of\s+orders\b/.test(q)) return 'orders';
+  if (/\bhow\s+many\s+(?:units?|bottles?|items?|cases?)/.test(q)) return 'units';
+  if (/\brevenue\b|\bsales\b|\bnet\s+sales\b|\btotal\s+sales\b|\bdollars?\b|\$\d|\bmoney\b|\bhow\s+much\s+(?:did|have|has)\s+(?:we|i)\s+(?:sell|sold|made)|\bhow\s+much\s+(?:did|have|has)\s+(?:we|i)\s+make/.test(q)) return 'revenue';
+  if (/\bunits?\b|\bbottles?\b|\bcases?\b|\bquantity\b/.test(q)) return 'units';
   if (/\borders?\b/.test(q)) return 'orders';
+  return null;
+}
+
+// "gift items", "gift boxes" → category hint that survives into builders as
+// a substring filter on product type/title.
+function extractCategory(q) {
+  if (/\bgift\s+(?:box|boxes|set|sets|items?|cards?)/.test(q)) return 'gift';
+  if (/\bnon[- ]?wine\b/.test(q)) return 'non-wine';
+  if (/\bolive\s+brine\b/.test(q)) return 'olive brine';
+  if (/\bvermouth\b/.test(q)) return 'vermouth';
+  return null;
+}
+
+// "what is commonly bought with <product hint>" / "for <product>"
+function extractProductHint(raw) {
+  if (!raw) return null;
+  const q = String(raw);
+  // Lookbehind for "with " or "alongside " or "for " followed by a
+  // capitalized product-ish run OR a varietal/term.
+  const after = q.match(/\b(?:bought|sold|paired|purchased|together)\s+with\s+([A-Za-z][A-Za-z0-9 '’\-]{2,40})/i)
+              || q.match(/\bwith\s+([A-Z][A-Za-z0-9 '’\-]{2,40})/);
+  if (after) {
+    let v = after[1].replace(/[?.!,]+$/g, '').trim();
+    // Trim trailing temporal phrases that snuck into the capture.
+    v = v.replace(/\s+(?:today|yesterday|this|last|past|all)\b.*$/i, '').trim();
+    if (v.length >= 3) return v;
+  }
   return null;
 }
 
@@ -168,15 +221,18 @@ function extract(raw) {
   const q = String(raw || '');
   const lower = q.toLowerCase();
   return {
-    customer: extractCustomerHint(q),
-    email:    extractEmail(q),
-    sku:      extractSku(q),
-    varietal: extractVarietal(lower),
-    color:    extractColor(lower),
-    vendor:   extractVendor(lower),
-    money:    extractMoneyThreshold(lower),
-    limit:    extractLimit(lower),
-    metric:   extractMetric(lower),
+    customer:    extractCustomerHint(q),
+    email:       extractEmail(q),
+    sku:         extractSku(q),
+    varietal:    extractVarietal(lower),
+    color:       extractColor(lower),
+    vendor:      extractVendor(lower),
+    category:    extractCategory(lower),
+    money:       extractMoneyThreshold(lower),
+    unitsBelow:  extractUnitThreshold(lower),
+    limit:       extractLimit(lower),
+    metric:      extractMetric(lower),
+    productHint: extractProductHint(q),
   };
 }
 
@@ -189,9 +245,12 @@ module.exports = {
   extractVarietal,
   extractColor,
   extractVendor,
+  extractCategory,
   extractMoneyThreshold,
+  extractUnitThreshold,
   extractLimit,
   extractMetric,
+  extractProductHint,
   looksLikeName,
   VARIETALS,
 };

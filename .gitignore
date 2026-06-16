@@ -10,3 +10,7 @@ server.backup.js
 /curl
 /git
 /main
+
+# Operational backfill log (regenerated on each run)
+scripts/backfill_history.log
+

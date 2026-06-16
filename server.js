@@ -402,7 +402,31 @@ function answerCustomerOrderQuestion(question, customers, orders) {
   return null;
 }
 
-app.post('/shopify-qa', async (req, res) => {
+function requireBasicAuth(req, res, next) {
+  const auth = req.headers.authorization || '';
+
+  if (!auth.startsWith('Basic ')) {
+    res.set('WWW-Authenticate', 'Basic realm="Shopify QA"');
+    return res.status(401).send('Authentication required');
+  }
+
+  const encoded = auth.split(' ')[1];
+  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  const [user, pass] = decoded.split(':');
+
+  if (
+    user === process.env.QA_USER &&
+    pass === process.env.QA_PASS
+  ) {
+    return next();
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="Shopify QA"');
+  return res.status(401).send('Invalid credentials');
+}
+
+
+app.post('/shopify-qa', requireBasicAuth, async (req, res) => {
   try {
     const question = String((req.body && req.body.question) || '').trim();
     if (!question) {

@@ -55,9 +55,11 @@ const formatters = {
   },
 
   basket_pairs(rows) {
-    if (!rows.length) return 'No co-purchase pairs found yet (need more order history).';
-    const top = rows.slice(0, 5).map((r) => `${r.title_a} + ${r.title_b} — ${r.orders_together} orders`);
-    return `Top SKU pairs:\n${top.join('\n')}`;
+    if (!rows.length) return 'No product-pair data found yet.';
+    const lines = rows.map((r, i) =>
+      `${i + 1}. ${r.product_a} + ${r.product_b} — ${r.times_bought_together} orders`
+    );
+    return lines.join('\n');
   },
 
   top_skus(rows) {

@@ -135,30 +135,31 @@ function lapsedCustomers(params) {
   return { text, values: [days, params.limit || 25], meta: { domain: 'customers' } };
 }
 
-function basketPairs(params) {
-  const minTogether = 2;
-  let filters = [`orders_together >= $1`];
-  const values = [minTogether];
-  let i = 2;
-  if (params.sku) {
-    values.push(params.sku);
-    filters.push(`(sku_a = $${i} or sku_b = $${i})`);
-    i++;
-  }
-  if (params.varietal) {
-    values.push(`%${params.varietal}%`);
-    filters.push(`(lower(title_a) like lower($${i}) or lower(title_b) like lower($${i}))`);
-    i++;
-  }
-  values.push(params.limit || 25);
+function basketPairs(params = {}) {
+  // Market-basket analysis: rank product pairs co-occurring in the same order.
+  // Operates directly on order_line_items (with an orders join to exclude
+  // cancelled orders, matching the rest of the analytics layer).
+  // Schema note: order_line_items uses `title` for the product title — there
+  // is no separate `product_title` column — so we alias it on the way out.
+  const limit = params.limit || 20;
   const text = `
-    select sku_a, title_a, sku_b, title_b, orders_together
-    from fact_basket_pairs
-    where ${filters.join(' and ')}
-    order by orders_together desc
-    limit $${i}
+    select
+      a.title as product_a,
+      b.title as product_b,
+      count(*)::int as times_bought_together
+    from order_line_items a
+    join order_line_items b
+      on a.order_id = b.order_id
+     and a.product_id < b.product_id
+    join orders o on o.id = a.order_id
+    where o.cancelled_at is null
+      and a.product_id is not null
+      and b.product_id is not null
+    group by a.title, b.title
+    order by times_bought_together desc
+    limit $1
   `;
-  return { text, values, meta: { domain: 'basket' } };
+  return { text, values: [limit], meta: { domain: 'orders' } };
 }
 
 function topSkus(params) {

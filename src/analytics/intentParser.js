@@ -104,8 +104,11 @@ function classifyIntent(qRaw) {
     return 'lapsed_customers';
   }
 
-  // Basket
-  if (/sell together|bought together|frequently (bought|purchased) (together|with)|basket|pairs of|combo/.test(q)) {
+  // Basket / market-basket analysis. Domain is 'orders' since this query
+  // operates on order_line_items joined within the same order.
+  if (
+    /what sells together|sold together|bought together|buy together|purchased together|commonly sold together|commonly bought together|most commonly sold together|basket pairs|market basket|affinity/.test(q)
+  ) {
     return 'basket_pairs';
   }
 

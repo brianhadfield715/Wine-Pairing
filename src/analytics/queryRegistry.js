@@ -38,8 +38,8 @@ const registry = {
 
   basket_pairs: {
     builder: b.basketPairs,
-    describe: 'SKUs that are purchased together in the same order.',
-    domain: 'basket',
+    describe: 'Products purchased together in the same order (market basket).',
+    domain: 'orders',
   },
 
   top_skus: {

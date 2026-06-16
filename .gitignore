@@ -1,3 +1,12 @@
 node_modules/
 .env
 .DS_Store
+
+# Local backup of the previous server.js — kept locally for reference, do not
+# commit. The git history is the canonical source of truth.
+server.backup.js
+
+# Accidental empty files created by stray shell redirects on Windows.
+/curl
+/git
+/main

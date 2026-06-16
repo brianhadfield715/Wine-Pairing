@@ -99,8 +99,10 @@ function trimNameTail(s) {
 const PHRASE_PATTERNS = [
   // "how much (did|has|have|do|does) <name> (spent|spend|spending|spends|owe|owed)..."
   /how\s+much\s+(?:did|has|have|do|does)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:spend|spent|spending|spends|owe|owed)/i,
-  // "what (has|did) <name> (spent|spend|spending|bought|buy|order|ordered|purchased|purchase)..."
-  /what\s+(?:has|did|have)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:spent|spend|spending|bought|buy|order|ordered|purchased|purchase)/i,
+  // "what (has|did|does|do) <name> (spent|spend|spending|bought|buy|buys|order|ordered|orders|purchased|purchase|purchases|like)..."
+  /what\s+(?:has|did|have|does|do)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:spent|spend|spending|bought|buy|buys|order|orders|ordered|purchased|purchase|purchases|like|prefer)/i,
+  // "what (varietal|vendor|product|category|wine) (does|do) <name> (buy|purchase|like|prefer) ..."
+  /what\s+(?:varietal|vendor|product|category|wine|wines)\s+(?:does|do|did)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:buy|buys|bought|purchase|purchases|purchased|like|prefer|order|orders|ordered)/i,
   // "how many (units|bottles|items|cases|orders) (has|did|have) <name> (bought|buy|placed|ordered|order)..."
   /how\s+many\s+(?:units?|bottles?|items?|cases?|orders?)\s+(?:has|did|have)\s+([a-z][a-z .'’\-]{1,60}?)\s+(?:bought|buy|placed|ordered|order|purchased)/i,
   // "when did <name> last (shop|order|buy|purchase|visit)..."
@@ -256,12 +258,56 @@ function extractMetric(q) {
 
 // "gift items", "gift boxes" → category hint that survives into builders as
 // a substring filter on product type/title.
+//
+// Also covers broader taxonomy synonyms requested by the manager spec:
+//   liquor / spirit / spirits / hard alcohol → 'spirit'
+//   beer / cider                              → 'beer'
+//   non-wine / non wine                       → 'non-wine'
+//   mixer / mixers / tonic / soda             → 'mixer'
+//   gift items / gift boxes / gift sets       → 'gift'
 function extractCategory(q) {
-  if (/\bgift\s+(?:box|boxes|set|sets|items?|cards?)/.test(q)) return 'gift';
+  if (/\b(?:spirits?|liquor|hard\s+alcohol)\b/.test(q)) return 'spirit';
+  if (/\b(?:beer|ciders?)\b/.test(q)) return 'beer';
+  if (/\bmixers?\b|\btonic\b|\bbitters?\b|\bvermouth\b/.test(q)) {
+    return /\bvermouth\b/.test(q) ? 'vermouth' : 'mixer';
+  }
+  if (/\bgift\s+(?:box|boxes|set|sets|items?|cards?)\b|\bgifts?\b/.test(q)) return 'gift';
   if (/\bnon[- ]?wine\b/.test(q)) return 'non-wine';
   if (/\bolive\s+brine\b/.test(q)) return 'olive brine';
-  if (/\bvermouth\b/.test(q)) return 'vermouth';
   return null;
+}
+
+// Output-mode detection: chart > table > text (chart wins because chart
+// words are more specific than "show me <X>").
+function extractOutputMode(q) {
+  if (/\b(?:chart|graph|graph\s+of|plot|visuali[sz]e|visual\s+of|bar\s+(?:chart|graph)|line\s+chart|line\s+graph|pie\s+chart|donut\s+chart|stacked\s+bar)\b/.test(q)) {
+    return 'chart';
+  }
+  if (/\b(?:table|tabulate|rows|break\s+out|show\s+me\s+by|in\s+a\s+table|as\s+a\s+table)\b/.test(q)) {
+    return 'table';
+  }
+  return null; // null = let the engine pick the default for the intent
+}
+
+function extractChartType(q) {
+  if (/\bbar\s+(?:chart|graph)\b/.test(q)) return 'bar';
+  if (/\bline\s+(?:chart|graph)\b/.test(q)) return 'line';
+  if (/\bstacked\s+bar\b/.test(q)) return 'stacked_bar';
+  if (/\bdonut\b/.test(q)) return 'donut';
+  if (/\bpie\b/.test(q)) return 'pie';
+  return null;
+}
+
+// "repeat customers" / "returning customers" / "first-time customers".
+function extractCustomerSegment(q) {
+  if (/\brepeat\s+(?:customers?|buyers?|shoppers?)|returning\s+(?:customers?|buyers?|shoppers?)/.test(q)) return 'repeat';
+  if (/\bfirst[- ]?time\s+(?:customers?|buyers?|shoppers?)|new\s+(?:customers?|buyers?|shoppers?)/.test(q)) return 'new';
+  return null;
+}
+
+// "what percent/percentage of customers ... were ..." / "share of ...".
+function extractShareIntent(q) {
+  return /\b(?:what\s+(?:percent|percentage|share|fraction)|share\s+of)\b/.test(q);
 }
 
 // Pulls a free-text product hint from common phrasings:
@@ -314,18 +360,22 @@ function extract(raw) {
   const q = String(raw || '');
   const lower = q.toLowerCase();
   return {
-    customer:    extractCustomerHint(q),
-    email:       extractEmail(q),
-    sku:         extractSku(q),
-    varietal:    extractVarietal(lower),
-    color:       extractColor(lower),
-    vendor:      extractVendor(lower),
-    category:    extractCategory(lower),
-    money:       extractMoneyThreshold(lower),
-    unitsBelow:  extractUnitThreshold(lower),
-    limit:       extractLimit(lower),
-    metric:      extractMetric(lower),
-    productHint: extractProductHint(q),
+    customer:        extractCustomerHint(q),
+    email:           extractEmail(q),
+    sku:             extractSku(q),
+    varietal:        extractVarietal(lower),
+    color:           extractColor(lower),
+    vendor:          extractVendor(lower),
+    category:        extractCategory(lower),
+    money:           extractMoneyThreshold(lower),
+    unitsBelow:      extractUnitThreshold(lower),
+    limit:           extractLimit(lower),
+    metric:          extractMetric(lower),
+    productHint:     extractProductHint(q),
+    outputMode:      extractOutputMode(lower),
+    chartType:       extractChartType(lower),
+    customerSegment: extractCustomerSegment(lower),
+    shareIntent:     extractShareIntent(lower),
   };
 }
 
@@ -344,6 +394,10 @@ module.exports = {
   extractLimit,
   extractMetric,
   extractProductHint,
+  extractOutputMode,
+  extractChartType,
+  extractCustomerSegment,
+  extractShareIntent,
   looksLikeName,
   looksLikeNameCI,
   normalizeName,

@@ -28,6 +28,7 @@ const { parse } = require('./intentParser');
 const registry = require('./queryRegistry');
 const { format, money, intish } = require('./formatters');
 const resolver = require('./resolver');
+const visualizations = require('./visualizations');
 
 const HELP_TEXT = [
   'I can answer broad questions about Harvest Wine Market sales, customers, and inventory. Try:',
@@ -245,35 +246,56 @@ async function answer(question) {
   const elapsed_ms = Date.now() - t0;
   const rows = result.rows || [];
 
+  // Build a visualization spec when the intent is inherently visual OR the
+  // user explicitly asked for a chart/table.
+  let visualization = null;
+  try {
+    visualization = visualizations.build(parsed.intent, rows, plan);
+  } catch (e) {
+    // Visualization failure should never break the JSON response.
+    console.error('[engine] visualization build failed:', e.message);
+  }
+
+  // For chart/table-requested outputs, signal the output mode in meta.
+  const outputMode = (visualization && visualization.output_mode) || 'text';
+
   return {
     question,
     intent: parsed.intent,
     domain: (buildResult.meta && buildResult.meta.domain) || entry.domain,
     answer: format(parsed.intent, rows, plan),
     data: rows,
+    visualization,
     meta: {
       status: 'ok',
       row_count: rows.length,
       elapsed_ms,
       timeframe: parsed.params.timeframe,
       scope: parsed.params.scope || null,
+      output_mode: outputMode,
+      chart_type: (visualization && visualization.chart_type) || null,
       params: {
-        days:           parsed.params.days,
-        day_count:      parsed.params.dayCount || null,
-        lapsed_days:    parsed.params.lapsedDays || null,
-        limit:          parsed.params.limit,
-        metric:         parsed.params.metric,
-        color:          parsed.params.color || null,
-        vendor:         parsed.params.vendor || null,
-        sku:            parsed.params.sku || null,
-        varietal:       parsed.params.varietal || null,
-        category:       parsed.params.category || null,
-        money:          parsed.params.money || null,
-        units_below:    parsed.params.unitsBelow || null,
-        customer_hint:  parsed.params.customerHint || null,
-        email_hint:     parsed.params.email || null,
-        product_hint:   parsed.params.productHint || null,
-        two_varietals:  parsed.params.twoVarietals || null,
+        days:             parsed.params.days,
+        day_count:        parsed.params.dayCount || null,
+        lapsed_days:      parsed.params.lapsedDays || null,
+        limit:            parsed.params.limit,
+        metric:           parsed.params.metric,
+        grain:            parsed.params.grain || null,
+        color:            parsed.params.color || null,
+        vendor:           parsed.params.vendor || null,
+        sku:              parsed.params.sku || null,
+        varietal:         parsed.params.varietal || null,
+        category:         parsed.params.category || null,
+        money:            parsed.params.money || null,
+        units_below:      parsed.params.unitsBelow || null,
+        customer_hint:    parsed.params.customerHint || null,
+        email_hint:       parsed.params.email || null,
+        product_hint:     parsed.params.productHint || null,
+        two_varietals:    parsed.params.twoVarietals || null,
+        customer_segment: parsed.params.customerSegment || null,
+        share_intent:     !!parsed.params.shareIntent || null,
+        output_mode:      parsed.params.outputMode || null,
+        chart_type:       parsed.params.chartType || null,
       },
       resolved: plan.resolved,
     },

@@ -1633,6 +1633,557 @@ function productDetailSearch(p) {
   return productDetail(p);
 }
 
+// ===========================================================================
+// LANGUAGE-EXPANSION v4 builders (smartness pass)
+// ===========================================================================
+
+// --- Repeat / new customers (counts and shares) ---------------------------
+//
+// A customer is "new" in window W if their first-ever purchase falls inside W.
+// A customer is "repeat" in W if they bought in W AND had at least one
+// earlier order before W.
+// Denominator for shares: distinct purchasing customers in W.
+
+function _repeatNewSqlCommon(tf) {
+  // Returns shared CTE + WHERE bindings for one window.
+  const w = windowFragments('fs.occurred_at', tf, 1);
+  return {
+    fragments: w.fragments,
+    values: w.values,
+    nextIdx: w.nextIdx,
+    whereWindow: w.fragments.length ? `where ${w.fragments.join(' and ')}` : '',
+  };
+}
+
+function repeatCustomersCount(p) {
+  const tf = p.timeframe;
+  const w = _repeatNewSqlCommon(tf);
+  const text = `
+    with in_window as (
+      select distinct fs.customer_id
+        from fact_sales fs
+       ${w.whereWindow}
+         ${w.fragments.length ? 'and' : 'where'} fs.customer_id is not null
+    ),
+    earliest as (
+      select customer_id, min(occurred_at) as first_seen
+        from fact_sales
+       where customer_id is not null
+       group by customer_id
+    )
+    select
+      count(distinct e.customer_id) filter (where ${tf && tf.sinceIso ? `e.first_seen < $${w.nextIdx}` : 'false'})::int as repeat_customers,
+      count(distinct iw.customer_id)::int as purchasing_customers
+    from in_window iw
+    left join earliest e on e.customer_id = iw.customer_id
+  `;
+  const values = [...w.values];
+  if (tf && tf.sinceIso) values.push(tf.sinceIso);
+  return { text, values, meta: { domain: 'customers', segment: 'repeat' } };
+}
+
+function newCustomersCount(p) {
+  const tf = p.timeframe;
+  const w = _repeatNewSqlCommon(tf);
+  const text = `
+    with in_window as (
+      select distinct fs.customer_id
+        from fact_sales fs
+       ${w.whereWindow}
+         ${w.fragments.length ? 'and' : 'where'} fs.customer_id is not null
+    ),
+    earliest as (
+      select customer_id, min(occurred_at) as first_seen
+        from fact_sales
+       where customer_id is not null
+       group by customer_id
+    )
+    select
+      count(distinct e.customer_id) filter (where ${tf && tf.sinceIso ? `e.first_seen >= $${w.nextIdx}` : 'false'})::int as new_customers,
+      count(distinct iw.customer_id)::int as purchasing_customers
+    from in_window iw
+    left join earliest e on e.customer_id = iw.customer_id
+  `;
+  const values = [...w.values];
+  if (tf && tf.sinceIso) values.push(tf.sinceIso);
+  return { text, values, meta: { domain: 'customers', segment: 'new' } };
+}
+
+// Share = same SQL, formatter computes percent from row.
+function repeatCustomersShare(p) { return repeatCustomersCount(p); }
+function newCustomersShare(p)    { return newCustomersCount(p); }
+
+// --- Distinct purchasing customers in a window ----------------------------
+function customersCountPurchasing(p) {
+  const tf = p.timeframe;
+  const w = windowFragments('fs.occurred_at', tf, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      count(distinct fs.customer_id)::int as purchasing_customers,
+      count(distinct fs.order_id)::int    as orders,
+      coalesce(sum(fs.net_revenue), 0)::numeric(14,2) as net_revenue
+      from fact_sales fs
+     ${where}
+       ${w.fragments.length ? 'and' : 'where'} fs.customer_id is not null
+  `;
+  return { text, values: w.values, meta: { domain: 'customers' } };
+}
+
+// --- Busiest hour (single window) and average busiest pattern -------------
+function busiestHour(p) {
+  const tf = (p.timeframe && p.timeframe.mode !== 'all_time')
+    ? p.timeframe
+    : { mode: 'window', sinceIso: new Date(Date.now() - 86400e3).toISOString(), untilIso: new Date().toISOString(), label: 'yesterday' };
+  const w = windowFragments('occurred_at', tf, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      date_part('hour', occurred_at)::int      as hour_of_day,
+      count(distinct order_id)::int            as orders,
+      coalesce(sum(quantity), 0)::int          as units,
+      coalesce(sum(net_revenue), 0)::numeric(14,2) as net_revenue
+      from fact_sales
+     ${where}
+     group by 1
+     order by orders desc, net_revenue desc
+     limit 24
+  `;
+  return { text, values: w.values, meta: { domain: 'orders', timeframe: tf } };
+}
+
+function busiestPeriodPattern() {
+  // Average orders per hour of day × day of week across the last 12 weeks.
+  const text = `
+    with recent as (
+      select * from fact_sales
+       where occurred_at >= now() - interval '84 days'
+    )
+    select
+      to_char(occurred_at, 'Dy')::text          as day_of_week,
+      date_part('dow', occurred_at)::int        as dow_idx,
+      date_part('hour', occurred_at)::int       as hour_of_day,
+      count(distinct order_id)::int             as orders,
+      coalesce(sum(net_revenue), 0)::numeric(14,2) as net_revenue
+      from recent
+     group by 1, 2, 3
+     order by orders desc, net_revenue desc
+     limit 50
+  `;
+  return { text, values: [], meta: { domain: 'orders' } };
+}
+
+// --- Price extremes -------------------------------------------------------
+function highestPricedItemSold(p) {
+  const tf = p.timeframe;
+  const w = windowFragments('fs.occurred_at', tf, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const values = [...w.values, p.limit || 5];
+  const text = `
+    select fs.sku, fs.product_title, fs.variant_title, fs.unit_price,
+           fs.quantity, fs.occurred_at, fs.order_name,
+           trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) as customer_name,
+           c.email as customer_email
+      from fact_sales fs
+      left join customers c on c.id = fs.customer_id
+     ${where}
+       ${w.fragments.length ? 'and' : 'where'} fs.unit_price is not null
+     order by fs.unit_price desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'sales' } };
+}
+
+function lowestPricedItemSold(p) {
+  const tf = p.timeframe;
+  const w = windowFragments('fs.occurred_at', tf, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const values = [...w.values, p.limit || 5];
+  const text = `
+    select fs.sku, fs.product_title, fs.variant_title, fs.unit_price,
+           fs.quantity, fs.occurred_at, fs.order_name,
+           trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) as customer_name,
+           c.email as customer_email
+      from fact_sales fs
+      left join customers c on c.id = fs.customer_id
+     ${where}
+       ${w.fragments.length ? 'and' : 'where'} fs.unit_price is not null
+       and fs.unit_price > 0
+     order by fs.unit_price asc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'sales' } };
+}
+
+function buyerOfHighestPricedItem(p) { return highestPricedItemSold(p); }
+function buyerOfLowestPricedItem(p)  { return lowestPricedItemSold(p); }
+
+// --- Customer top products / vendors / categories (one customer) ----------
+function customerTopProducts(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const w = windowFragments('fs.occurred_at', p.timeframe, 2);
+  const values = [cid, ...w.values, p.limit || 10];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select fs.product_title,
+           sum(fs.quantity)::int               as units,
+           sum(fs.net_revenue)::numeric(14,2)  as spend,
+           count(distinct fs.order_id)         as orders
+      from fact_sales fs
+     where fs.customer_id = $1 ${where}
+     group by fs.product_title
+     order by units desc nulls last, spend desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+function customerTopVendors(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const w = windowFragments('fs.occurred_at', p.timeframe, 2);
+  const values = [cid, ...w.values, p.limit || 10];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select coalesce(nullif(fs.vendor,''), '(unknown)') as vendor,
+           sum(fs.quantity)::int               as units,
+           sum(fs.net_revenue)::numeric(14,2)  as spend,
+           count(distinct fs.order_id)         as orders
+      from fact_sales fs
+     where fs.customer_id = $1 ${where}
+     group by 1
+     order by spend desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+function customerTopCategories(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const w = windowFragments('fs.occurred_at', p.timeframe, 2);
+  const values = [cid, ...w.values, p.limit || 10];
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select coalesce(nullif(p.product_type,''), '(unknown)') as category,
+           sum(fs.quantity)::int                            as units,
+           sum(fs.net_revenue)::numeric(14,2)               as spend,
+           count(distinct fs.order_id)                       as orders
+      from fact_sales fs
+      left join products p on p.id = fs.product_id
+     where fs.customer_id = $1 ${where}
+     group by 1
+     order by spend desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+// --- Customer cadence -----------------------------------------------------
+function customerFrequencyProfile(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const text = `
+    with orders_per as (
+      select customer_id, order_id, min(occurred_at) as occurred_at
+        from fact_sales
+       where customer_id = $1
+       group by customer_id, order_id
+    ),
+    spans as (
+      select customer_id,
+             count(*)::int                                                  as order_count,
+             min(occurred_at)                                               as first_order_at,
+             max(occurred_at)                                               as last_order_at,
+             extract(epoch from (max(occurred_at) - min(occurred_at)))/86400 as window_days
+        from orders_per
+       group by customer_id
+    )
+    select
+      customer_id,
+      order_count,
+      first_order_at,
+      last_order_at,
+      window_days::int                                                       as span_days,
+      case when order_count > 1 and window_days > 0
+           then round((window_days::numeric / (order_count - 1)), 1)
+           else null end                                                     as avg_days_between_orders,
+      (extract(epoch from (now() - last_order_at)) / 86400)::int             as days_since_last_order
+    from spans
+  `;
+  return { text, values: [cid], meta: { domain: 'customers' } };
+}
+
+// --- Lapsed-but-formerly-frequent customers --------------------------------
+function lapsedFrequentCustomers(p) {
+  const minOrders = 4;
+  const minDays = p.lapsedDays || 60;
+  const text = `
+    select customer_id, email, customer_name,
+           order_count, total_spend, last_order_at, days_since_last_order,
+           favorite_vendor, favorite_product_type
+      from dim_customer_profile
+     where order_count >= $1
+       and days_since_last_order >= $2
+       and total_spend > 0
+     order by total_spend desc nulls last
+     limit $3
+  `;
+  return { text, values: [minOrders, minDays, p.limit || 25], meta: { domain: 'customers', min_orders: minOrders, min_days: minDays } };
+}
+
+function customerReactivationCandidates(p) {
+  // Customers who recently came back after >= 180 days inactive.
+  const reactivationGap = 180;
+  const recentWindow = 30;
+  const text = `
+    with last_two as (
+      select customer_id,
+             max(occurred_at) as last_at,
+             (
+               select max(occurred_at)
+                 from fact_sales fs2
+                where fs2.customer_id = fact_sales.customer_id
+                  and fs2.occurred_at < (
+                    select max(occurred_at)
+                      from fact_sales fs3
+                     where fs3.customer_id = fact_sales.customer_id
+                  )
+             ) as prev_at
+        from fact_sales
+       where customer_id is not null
+       group by customer_id
+    )
+    select lt.customer_id,
+           c.email,
+           trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) as customer_name,
+           lt.last_at, lt.prev_at,
+           extract(epoch from (lt.last_at - lt.prev_at))/86400 as gap_days
+      from last_two lt
+      left join customers c on c.id = lt.customer_id
+     where lt.last_at >= now() - ($1 || ' days')::interval
+       and lt.prev_at is not null
+       and lt.last_at - lt.prev_at >= ($2 || ' days')::interval
+     order by lt.last_at desc
+     limit $3
+  `;
+  return { text, values: [String(recentWindow), String(reactivationGap), p.limit || 25], meta: { domain: 'customers' } };
+}
+
+// --- Type / category / varietal breakdowns -------------------------------
+function typeTopSeller(p) {
+  // Returns the single best-selling product_type in the window, but also
+  // returns the full ranked list so the formatter / table can present it.
+  return typeBreakdown(p);
+}
+
+function typeBreakdown(p) {
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const values = [...w.values, p.limit || 10];
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select coalesce(nullif(p.product_type,''), '(unknown)') as type,
+           sum(fs.quantity)::int                            as units,
+           sum(fs.net_revenue)::numeric(14,2)               as revenue,
+           count(distinct fs.order_id)                       as orders
+      from fact_sales fs
+      left join products p on p.id = fs.product_id
+     ${where}
+     group by 1
+     order by units desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'sales', group_by: 'product_type' } };
+}
+
+function varietalRanking(p) {
+  // Group by product_title tokens — proxy varietal extraction is too lossy,
+  // so we group by full product_title (close enough at store level) when no
+  // dedicated varietal column exists. Top items by units within window.
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const values = [...w.values, p.limit || 10];
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select fs.product_title                                  as varietal,
+           sum(fs.quantity)::int                              as units,
+           sum(fs.net_revenue)::numeric(14,2)                 as revenue,
+           count(distinct fs.customer_id)                     as customers
+      from fact_sales fs
+     ${where}
+     group by 1
+     order by units desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'sales', group_by: 'product_title' } };
+}
+
+// --- Share / mix percentages ---------------------------------------------
+function shareOfSalesByFilter(p) {
+  // numerator = sum where filter matches; denominator = total.
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const values = [...w.values];
+  let i = w.nextIdx;
+  // Build the matching filter on the same fact_sales row.
+  const matchers = [];
+  if (p.color)    { values.push(`%${p.color}%`);    matchers.push(`lower(fs.product_title) like lower($${i++})`); }
+  if (p.varietal) { values.push(`%${p.varietal}%`); matchers.push(`lower(fs.product_title) like lower($${i++})`); }
+  if (p.vendor)   { values.push(`%${p.vendor}%`);   matchers.push(`lower(fs.vendor) like lower($${i++})`); }
+  if (p.category) { values.push(`%${p.category}%`); matchers.push(`(lower(fs.product_title) like lower($${i}) or lower(fs.variant_title) like lower($${i}))`); i++; }
+  if (!matchers.length) {
+    // Nothing to filter by → degenerate, returns 100%.
+    matchers.push('true');
+  }
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      coalesce(sum(case when ${matchers.join(' and ')} then fs.net_revenue end), 0)::numeric(14,2) as numerator,
+      coalesce(sum(fs.net_revenue), 0)::numeric(14,2)                                              as denominator,
+      coalesce(sum(case when ${matchers.join(' and ')} then fs.quantity end), 0)::int              as units_numerator,
+      coalesce(sum(fs.quantity), 0)::int                                                            as units_denominator
+      from fact_sales fs
+     ${where}
+  `;
+  return { text, values, meta: { domain: 'sales' } };
+}
+
+function shareOfRevenueTopN(p) {
+  const n = p.limit || 10;
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const values = [...w.values, n];
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    with totals as (
+      select coalesce(sum(net_revenue), 0)::numeric(14,2) as total_revenue
+        from fact_sales ${where}
+    ),
+    ranked as (
+      select fs.product_id, max(fs.product_title) as product_title,
+             sum(fs.net_revenue) as revenue
+        from fact_sales fs ${where}
+       group by fs.product_id
+       order by revenue desc nulls last
+       limit $${w.nextIdx}
+    )
+    select
+      (select total_revenue from totals)                            as denominator,
+      coalesce(sum(r.revenue), 0)::numeric(14,2)                     as numerator,
+      $${w.nextIdx}::int                                              as top_n,
+      array_agg(r.product_title order by r.revenue desc)              as top_products
+      from ranked r
+  `;
+  return { text, values, meta: { domain: 'sales' } };
+}
+
+function shareOfDeadInventoryValue(p) {
+  const days = p.dayCount || 90;
+  const text = `
+    with totals as (
+      select coalesce(sum(v.on_hand * v.price), 0)::numeric(14,2) as total_retail
+        from vw_current_inventory v
+       where v.on_hand > 0
+         and coalesce(v.product_status, 'active') = 'active'
+    ),
+    dead as (
+      select coalesce(sum(d.on_hand * v.price), 0)::numeric(14,2) as dead_retail
+        from dim_sku_profile d
+        join vw_current_inventory v on v.sku = d.sku
+       where d.on_hand > 0
+         and (d.last_sold_at is null or d.last_sold_at < now() - ($1 || ' days')::interval)
+    )
+    select
+      (select dead_retail from dead)        as numerator,
+      (select total_retail from totals)      as denominator
+  `;
+  return { text, values: [String(days)], meta: { domain: 'inventory', days } };
+}
+
+function shareOfOrdersWithFilter(p) {
+  // "what percentage of orders included gift items"
+  const w = windowFragments('o.created_at', p.timeframe, 1);
+  const values = [...w.values];
+  let i = w.nextIdx;
+  let matcher = 'false';
+  if (p.color)    { values.push(`%${p.color}%`);    matcher = `lower(oli.title) like lower($${i++})`; }
+  else if (p.varietal) { values.push(`%${p.varietal}%`); matcher = `lower(oli.title) like lower($${i++})`; }
+  else if (p.category) { values.push(`%${p.category}%`); matcher = `(lower(oli.title) like lower($${i}) or lower(oli.variant_title) like lower($${i}))`; i++; }
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      count(distinct o.id) filter (where exists (
+        select 1 from order_line_items oli
+         where oli.order_id = o.id and ${matcher}
+      ))::int                                              as numerator,
+      count(distinct o.id)::int                            as denominator
+      from orders o
+     ${where}
+       ${w.fragments.length ? 'and' : 'where'} o.cancelled_at is null
+  `;
+  return { text, values, meta: { domain: 'orders' } };
+}
+
+// --- Dashboard summary (multi-metric bundle) ------------------------------
+function dashboardSummary(p) {
+  // Returns a single row with multiple aggregates plus separate rows for
+  // top products / top vendors so the formatter can stitch them together.
+  const tf = (p.timeframe && p.timeframe.mode !== 'all_time')
+    ? p.timeframe
+    : { mode: 'window', sinceIso: new Date(Date.now() - 7 * 86400e3).toISOString(), untilIso: new Date().toISOString(), label: 'last 7 days (default)' };
+  const w = windowFragments('fs.occurred_at', tf, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  // Two parallel queries are easier than one giant CTE — but we keep it in
+  // a single statement using UNION ALL of typed rows so engine code stays
+  // simple. Each row has a `bucket` column distinguishing the section.
+  const text = `
+    select 'kpi'::text as bucket,
+           null::text  as label,
+           coalesce(sum(fs.net_revenue), 0)::numeric(14,2)            as revenue,
+           coalesce(sum(fs.quantity), 0)::int                         as units,
+           count(distinct fs.order_id)::int                           as orders,
+           count(distinct fs.customer_id)::int                        as customers,
+           case when count(distinct fs.order_id) > 0
+                then (sum(fs.net_revenue) / count(distinct fs.order_id))::numeric(14,2)
+                else 0 end                                             as aov
+      from fact_sales fs
+     ${where}
+    union all
+    select 'top_product',
+           x.product_title,
+           x.revenue, x.units, x.orders, null::int, null::numeric
+      from (
+        select fs.product_title,
+               sum(fs.net_revenue)::numeric(14,2) as revenue,
+               sum(fs.quantity)::int              as units,
+               count(distinct fs.order_id)::int   as orders
+          from fact_sales fs
+         ${where}
+         group by fs.product_title
+         order by revenue desc nulls last
+         limit 5
+      ) x
+    union all
+    select 'top_vendor',
+           coalesce(nullif(fs.vendor,''), '(unknown)'),
+           sum(fs.net_revenue)::numeric(14,2),
+           sum(fs.quantity)::int,
+           count(distinct fs.order_id)::int,
+           null::int, null::numeric
+      from fact_sales fs
+     ${where}
+     group by 2
+     order by 3 desc nulls last
+     limit 5
+  `;
+  // The third arm reuses the same window twice — fragment indices are
+  // already $1/$2-style, but `union all` requires all branches to have the
+  // same parameter list. Postgres handles this fine because each occurrence
+  // of $N refers to the same value.
+  // Bind values: window appears three times → pad accordingly. With the
+  // simple windowFragments approach we already use $1/$2 for the window.
+  // Postgres allows re-using parameters in different branches.
+  return { text, values: w.values, meta: { domain: 'dashboard', timeframe: tf } };
+}
+
 module.exports = {
   // customers
   topCustomersBySpend,
@@ -1714,4 +2265,30 @@ module.exports = {
   dataCoverageAll,
   // product detail search wrapper
   productDetailSearch,
+  // smartness pass v4
+  repeatCustomersCount,
+  newCustomersCount,
+  repeatCustomersShare,
+  newCustomersShare,
+  customersCountPurchasing,
+  busiestHour,
+  busiestPeriodPattern,
+  highestPricedItemSold,
+  lowestPricedItemSold,
+  buyerOfHighestPricedItem,
+  buyerOfLowestPricedItem,
+  customerTopProducts,
+  customerTopVendors,
+  customerTopCategories,
+  customerFrequencyProfile,
+  lapsedFrequentCustomers,
+  customerReactivationCandidates,
+  typeTopSeller,
+  typeBreakdown,
+  varietalRanking,
+  shareOfSalesByFilter,
+  shareOfRevenueTopN,
+  shareOfDeadInventoryValue,
+  shareOfOrdersWithFilter,
+  dashboardSummary,
 };

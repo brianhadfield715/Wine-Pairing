@@ -99,6 +99,47 @@ const registry = {
 
   // --- Product detail by partial-title hint ---
   product_detail_search:   { builder: b.productDetailSearch,   describe: 'Product detail resolved by partial title / keyword.', domain: 'sales', needsProductSearch: true },
+
+  // --- v4 smartness pass: repeat / new / share -------------------------
+  repeat_customers_count:        { builder: b.repeatCustomersCount,        describe: 'Count of repeat (returning) customers in window.',      domain: 'customers' },
+  new_customers_count:           { builder: b.newCustomersCount,           describe: 'Count of new (first-time) customers in window.',        domain: 'customers' },
+  repeat_customers_share:        { builder: b.repeatCustomersShare,        describe: 'Repeat-customer share of purchasing customers.',         domain: 'customers' },
+  new_customers_share:           { builder: b.newCustomersShare,           describe: 'New-customer share of purchasing customers.',            domain: 'customers' },
+  customers_count_purchasing:    { builder: b.customersCountPurchasing,    describe: 'Distinct purchasing customers in window.',               domain: 'customers' },
+
+  // --- v4: busiest hour / pattern --------------------------------------
+  busiest_hour:                  { builder: b.busiestHour,                 describe: 'Single-window busiest hour by orders/units/revenue.',    domain: 'orders' },
+  busiest_period_pattern:        { builder: b.busiestPeriodPattern,        describe: 'Typical busiest day/hour pattern across last 12 weeks.', domain: 'orders' },
+
+  // --- v4: price extremes ----------------------------------------------
+  highest_priced_item_sold:      { builder: b.highestPricedItemSold,       describe: 'Highest unit-priced item sold in window.',               domain: 'sales' },
+  lowest_priced_item_sold:       { builder: b.lowestPricedItemSold,        describe: 'Lowest unit-priced item sold in window.',                domain: 'sales' },
+  buyer_of_highest_priced_item:  { builder: b.buyerOfHighestPricedItem,    describe: 'Customer who bought the most expensive item.',           domain: 'sales' },
+  buyer_of_lowest_priced_item:   { builder: b.buyerOfLowestPricedItem,     describe: 'Customer who bought the cheapest item.',                 domain: 'sales' },
+
+  // --- v4: customer preference (one customer) --------------------------
+  customer_top_products:         { builder: b.customerTopProducts,         describe: 'Top products for one customer in window.',               domain: 'customers', needsCustomer: true },
+  customer_top_vendors:          { builder: b.customerTopVendors,          describe: 'Top vendors for one customer in window.',                domain: 'customers', needsCustomer: true },
+  customer_top_categories:       { builder: b.customerTopCategories,       describe: 'Top product categories for one customer in window.',     domain: 'customers', needsCustomer: true },
+
+  // --- v4: customer cadence / lapsed-frequent --------------------------
+  customer_frequency_profile:    { builder: b.customerFrequencyProfile,    describe: 'One customer cadence: order span, avg days between, recency.', domain: 'customers', needsCustomer: true },
+  lapsed_frequent_customers:     { builder: b.lapsedFrequentCustomers,     describe: 'Previously frequent customers who have gone quiet.',     domain: 'customers' },
+  customer_reactivation_candidates: { builder: b.customerReactivationCandidates, describe: 'Customers who recently came back after a long gap.', domain: 'customers' },
+
+  // --- v4: storewide breakdowns ----------------------------------------
+  type_top_seller:               { builder: b.typeTopSeller,               describe: 'Top product types in window (ranked list).',             domain: 'sales' },
+  type_breakdown:                { builder: b.typeBreakdown,               describe: 'Units/revenue broken down by product type.',             domain: 'sales' },
+  varietal_ranking:              { builder: b.varietalRanking,             describe: 'Top varietals/products in window.',                       domain: 'sales' },
+
+  // --- v4: share / mix --------------------------------------------------
+  share_of_sales_by_filter:      { builder: b.shareOfSalesByFilter,        describe: 'Share of revenue/units for a filter (color/varietal/vendor/category).', domain: 'sales' },
+  share_of_revenue_top_n:        { builder: b.shareOfRevenueTopN,          describe: 'Share of revenue from the top N products.',              domain: 'sales' },
+  share_of_dead_inventory_value: { builder: b.shareOfDeadInventoryValue,   describe: 'Share of retail inventory value that is dead.',          domain: 'inventory' },
+  share_of_orders_with_filter:   { builder: b.shareOfOrdersWithFilter,     describe: 'Share of orders containing a given category/varietal/etc.', domain: 'orders' },
+
+  // --- v4: dashboard ---------------------------------------------------
+  dashboard_summary:             { builder: b.dashboardSummary,            describe: 'Bundled KPI dashboard + top products + top vendors.',    domain: 'dashboard' },
 };
 
 function get(intent) { return registry[intent] || null; }

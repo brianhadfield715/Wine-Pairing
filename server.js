@@ -565,6 +565,247 @@ app.post('/admin/sync/backfill', requireBasicAuth, requireDb, async (req, res) =
 // Health
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// /qa  (PROTECTED — same auth as /shopify-qa). Serves a single-file BI page
+// that posts questions to /shopify-qa and renders text, tables, and charts
+// (bar / line / pie / donut / stacked_bar) from the visualization spec.
+// This is purely additive — any existing client of /shopify-qa continues to
+// work unchanged because /shopify-qa still returns the answer/data fields.
+// ---------------------------------------------------------------------------
+const QA_PAGE_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Harvest BI</title>
+<style>
+:root { --bg:#0e1014; --panel:#171b22; --ink:#e7eaf0; --dim:#9aa3b2; --acc:#9bd2ff; --good:#6ddf9a; --bad:#ff8a8a; --line:#262b34; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
+header h1 { margin:0; font-size:16px; font-weight:600; letter-spacing:.2px; }
+header .meta { color:var(--dim); font-size:12px; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 16px 20px 80px; }
+form { display:flex; gap:8px; margin: 14px 0; }
+input[type=text] { flex:1; background:var(--panel); border:1px solid var(--line); color:var(--ink); padding:10px 12px; border-radius:8px; font-size:14px; }
+button { background:var(--acc); color:#0b0e12; border:0; padding:10px 14px; border-radius:8px; font-weight:600; cursor:pointer; }
+button:disabled { opacity:.6; cursor:wait; }
+.examples { display:flex; gap:6px; flex-wrap:wrap; margin: 6px 0 14px; }
+.examples button { background:var(--panel); color:var(--ink); border:1px solid var(--line); font-weight:500; font-size:12px; padding:6px 10px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-top:14px; }
+.card h2 { margin:0 0 4px; font-size:14px; font-weight:600; }
+.card .sub { color:var(--dim); font-size:12px; margin-bottom:10px; }
+.answer { white-space: pre-wrap; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { padding:6px 10px; text-align:left; border-bottom:1px solid var(--line); }
+th { color: var(--dim); font-weight:500; }
+.meta-bar { color: var(--dim); font-size:12px; margin-top:8px; }
+.error { color: var(--bad); }
+.svg-wrap { width:100%; overflow-x:auto; }
+svg { display:block; }
+.legend { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--dim); margin-top:6px; }
+.legend span.dot { width:10px; height:10px; border-radius:2px; display:inline-block; margin-right:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🍷 Harvest BI</h1>
+  <span class="meta">staff analytics — same data, same auth</span>
+</header>
+<div class="wrap">
+  <form id="ask">
+    <input id="q" type="text" placeholder='Try: "how much did we sell last week" or "chart top 10 varietals last month"' autocomplete="off"/>
+    <button id="go">Ask</button>
+  </form>
+  <div class="examples" id="examples"></div>
+  <div id="result"></div>
+</div>
+<script>
+const EXAMPLES = [
+  'how much did we sell last week',
+  'top items sold yesterday',
+  'chart top 10 varietals last quarter',
+  'show me sales by day last week',
+  'how many repeat customers did we have last week',
+  'who spent the most last week',
+  'how did last week compare to the week before',
+  'show me a table of dead inventory',
+  'give me a dashboard for last week',
+];
+const ex = document.getElementById('examples');
+EXAMPLES.forEach(t => { const b = document.createElement('button'); b.textContent = t; b.onclick = () => { document.getElementById('q').value = t; ask(); return false; }; ex.appendChild(b); });
+
+const PALETTE = ['#9bd2ff','#6ddf9a','#ffd479','#ff9bd2','#cdb7ff','#7fd6c7','#ffb27f','#a0b0c0'];
+function fmtMoney(n){ if(n==null) return '$0.00'; return '$' + Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtInt(n){ if(n==null) return '0'; return Number(n).toLocaleString('en-US'); }
+function fmtPct(n){ if(n==null) return '0%'; return (Number(n)*100).toFixed(1)+'%'; }
+function fmtValue(v, format){ if(v==null) return '—'; if(format==='currency') return fmtMoney(v); if(format==='percent') return fmtPct(v); if(format==='integer') return fmtInt(v); return String(v); }
+
+function renderTable(spec){
+  const rows = spec.rows || [];
+  if (!rows.length) return '<div class="meta-bar">no rows</div>';
+  const keys = Object.keys(rows[0]).filter(k => k !== 'raw');
+  const head = '<tr>' + keys.map(k => '<th>' + escapeHtml(k) + '</th>').join('') + '</tr>';
+  const body = rows.slice(0, 200).map(r =>
+    '<tr>' + keys.map(k => '<td>' + escapeHtml(String(r[k] ?? '')) + '</td>').join('') + '</tr>'
+  ).join('');
+  return '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+}
+
+function renderBar(spec){
+  const rows = (spec.rows || []).slice(0, 30);
+  if (!rows.length) return '<div class="meta-bar">no rows to chart</div>';
+  const W = 880, H = 320, padL = 60, padB = 90, padT = 12, padR = 14;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const xField = spec.x_field, yField = spec.y_field;
+  const ys = rows.map(r => Number(r[yField]) || 0);
+  const yMax = Math.max(...ys, 0); const yMin = Math.min(...ys, 0);
+  const range = (yMax - yMin) || 1;
+  const bw = Math.max(8, innerW / rows.length - 6);
+  const xs = rows.map((_, i) => padL + i * (innerW / rows.length) + (innerW / rows.length - bw) / 2);
+  const zero = padT + innerH - ((0 - yMin) / range) * innerH;
+  let svg = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '">';
+  // y axis grid + labels (3 ticks)
+  for (let t=0; t<=3; t++){
+    const v = yMin + (range * t / 3);
+    const y = padT + innerH - (t / 3) * innerH;
+    svg += '<line x1="' + padL + '" x2="' + (W-padR) + '" y1="' + y + '" y2="' + y + '" stroke="#262b34"/>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (y+4) + '" fill="#9aa3b2" font-size="11" text-anchor="end">' + escapeHtml(fmtValue(v, spec.value_format)) + '</text>';
+  }
+  rows.forEach((r, i) => {
+    const v = Number(r[yField]) || 0;
+    const top = padT + innerH - ((v - yMin) / range) * innerH;
+    const h = Math.max(0, zero - top);
+    const color = v >= 0 ? PALETTE[i % PALETTE.length] : '#ff8a8a';
+    svg += '<rect x="' + xs[i] + '" y="' + Math.min(top, zero) + '" width="' + bw + '" height="' + Math.abs(h) + '" fill="' + color + '" rx="2"/>';
+    const label = String(r[xField] ?? '');
+    const labShort = label.length > 14 ? label.slice(0, 12) + '…' : label;
+    svg += '<text transform="translate(' + (xs[i] + bw/2) + ',' + (H - padB + 12) + ') rotate(-32)" fill="#9aa3b2" font-size="11" text-anchor="end">' + escapeHtml(labShort) + '</text>';
+    svg += '<title>' + escapeHtml(label + ': ' + fmtValue(v, spec.value_format)) + '</title>';
+  });
+  svg += '</svg>';
+  return '<div class="svg-wrap">' + svg + '</div>';
+}
+
+function renderLine(spec){
+  const rows = (spec.rows || []);
+  if (!rows.length) return '<div class="meta-bar">no rows to chart</div>';
+  const W = 880, H = 300, padL = 60, padB = 50, padT = 12, padR = 14;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const xField = spec.x_field, yField = spec.y_field;
+  const ys = rows.map(r => Number(r[yField]) || 0);
+  const yMax = Math.max(...ys, 0), yMin = Math.min(...ys, 0);
+  const range = (yMax - yMin) || 1;
+  const xs = rows.map((_, i) => padL + (i / Math.max(1, rows.length - 1)) * innerW);
+  const points = rows.map((r, i) => xs[i] + ',' + (padT + innerH - ((Number(r[yField]) || 0) - yMin) / range * innerH)).join(' ');
+  let svg = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '">';
+  for (let t=0; t<=3; t++){
+    const v = yMin + (range * t / 3);
+    const y = padT + innerH - (t / 3) * innerH;
+    svg += '<line x1="' + padL + '" x2="' + (W-padR) + '" y1="' + y + '" y2="' + y + '" stroke="#262b34"/>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (y+4) + '" fill="#9aa3b2" font-size="11" text-anchor="end">' + escapeHtml(fmtValue(v, spec.value_format)) + '</text>';
+  }
+  svg += '<polyline fill="none" stroke="#9bd2ff" stroke-width="2" points="' + points + '"/>';
+  rows.forEach((r, i) => {
+    const cy = padT + innerH - ((Number(r[yField]) || 0) - yMin) / range * innerH;
+    svg += '<circle cx="' + xs[i] + '" cy="' + cy + '" r="3" fill="#9bd2ff"><title>' + escapeHtml(String(r[xField] ?? '') + ': ' + fmtValue(r[yField], spec.value_format)) + '</title></circle>';
+    if (rows.length <= 20) {
+      const lab = String(r[xField] ?? '');
+      const labShort = lab.length > 12 ? lab.slice(2,12) : lab;
+      svg += '<text x="' + xs[i] + '" y="' + (H - padB + 14) + '" fill="#9aa3b2" font-size="11" text-anchor="middle">' + escapeHtml(labShort) + '</text>';
+    }
+  });
+  svg += '</svg>';
+  return '<div class="svg-wrap">' + svg + '</div>';
+}
+
+function renderPie(spec){
+  const rows = (spec.rows || []).slice(0, 12);
+  if (!rows.length) return '<div class="meta-bar">no rows to chart</div>';
+  const cx = 160, cy = 160, r = 130, ir = spec.chart_type === 'donut' ? 70 : 0;
+  const total = rows.reduce((a, x) => a + (Number(x[spec.y_field]) || 0), 0) || 1;
+  let acc = -Math.PI/2;
+  let svg = '<svg width="380" height="320" viewBox="0 0 380 320">';
+  rows.forEach((row, i) => {
+    const v = Number(row[spec.y_field]) || 0;
+    const ang = (v / total) * Math.PI * 2;
+    const x1 = cx + r * Math.cos(acc), y1 = cy + r * Math.sin(acc);
+    const x2 = cx + r * Math.cos(acc + ang), y2 = cy + r * Math.sin(acc + ang);
+    const large = ang > Math.PI ? 1 : 0;
+    let path;
+    if (ir > 0) {
+      const ix1 = cx + ir * Math.cos(acc + ang), iy1 = cy + ir * Math.sin(acc + ang);
+      const ix2 = cx + ir * Math.cos(acc), iy2 = cy + ir * Math.sin(acc);
+      path = 'M' + x1 + ',' + y1 + ' A' + r + ',' + r + ' 0 ' + large + ',1 ' + x2 + ',' + y2 + ' L' + ix1 + ',' + iy1 + ' A' + ir + ',' + ir + ' 0 ' + large + ',0 ' + ix2 + ',' + iy2 + ' Z';
+    } else {
+      path = 'M' + cx + ',' + cy + ' L' + x1 + ',' + y1 + ' A' + r + ',' + r + ' 0 ' + large + ',1 ' + x2 + ',' + y2 + ' Z';
+    }
+    svg += '<path d="' + path + '" fill="' + PALETTE[i % PALETTE.length] + '"><title>' + escapeHtml(String(row[spec.x_field] ?? '') + ': ' + fmtValue(v, spec.value_format)) + '</title></path>';
+    acc += ang;
+  });
+  svg += '</svg>';
+  const legend = '<div class="legend">' + rows.map((row, i) => '<span><span class="dot" style="background:' + PALETTE[i % PALETTE.length] + '"></span>' + escapeHtml(String(row[spec.x_field] ?? '')) + '</span>').join('') + '</div>';
+  return svg + legend;
+}
+
+function renderChart(spec){
+  const t = spec.chart_type;
+  if (t === 'line') return renderLine(spec);
+  if (t === 'pie' || t === 'donut') return renderPie(spec);
+  return renderBar(spec); // default
+}
+
+function renderVisualization(spec){
+  if (!spec) return '';
+  let out = '';
+  if (spec.output_mode === 'chart' || (spec.chart_type && spec.output_mode !== 'table')) {
+    out += renderChart(spec);
+  } else {
+    out += renderTable(spec);
+  }
+  return out;
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function ask(){
+  const q = document.getElementById('q').value.trim();
+  if (!q) return;
+  const btn = document.getElementById('go');
+  btn.disabled = true; btn.textContent = '…';
+  const out = document.getElementById('result');
+  out.innerHTML = '<div class="card"><div class="answer">Thinking…</div></div>';
+  try {
+    const res = await fetch('/shopify-qa', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ question: q }) });
+    const j = await res.json();
+    let html = '<div class="card">';
+    html += '<h2>' + escapeHtml((j.visualization && j.visualization.title) || q) + '</h2>';
+    if (j.visualization && j.visualization.subtitle) html += '<div class="sub">' + escapeHtml(j.visualization.subtitle) + '</div>';
+    if (j.answer) html += '<div class="answer">' + escapeHtml(j.answer) + '</div>';
+    if (j.visualization) html += '<div style="margin-top:12px">' + renderVisualization(j.visualization) + '</div>';
+    else if (j.data && Array.isArray(j.data) && j.data.length && typeof j.data[0] === 'object') {
+      html += '<div style="margin-top:12px">' + renderTable({ rows: j.data }) + '</div>';
+    }
+    html += '<div class="meta-bar">intent=' + escapeHtml(j.intent || '') + ' · domain=' + escapeHtml(j.domain || '') + ' · status=' + escapeHtml((j.meta && j.meta.status) || '') + (j.meta && j.meta.timeframe ? ' · timeframe=' + escapeHtml(j.meta.timeframe.label || j.meta.timeframe.mode || '') : '') + '</div>';
+    html += '</div>';
+    out.innerHTML = html;
+  } catch (e) {
+    out.innerHTML = '<div class="card error">Error: ' + escapeHtml(e.message) + '</div>';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Ask';
+  }
+}
+document.getElementById('ask').addEventListener('submit', e => { e.preventDefault(); ask(); });
+</script>
+</body>
+</html>
+`;
+
+app.get('/qa', requireBasicAuth, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(QA_PAGE_HTML);
+});
+
 app.get('/health', async (req, res) => {
   const out = { ok: true, db: { enabled: db.isEnabled() } };
   if (db.isEnabled()) {

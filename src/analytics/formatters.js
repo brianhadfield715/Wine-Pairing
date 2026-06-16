@@ -510,6 +510,189 @@ const F = {
     return F.product_detail(rows, plan);
   },
 
+  // ===== v4 smartness pass =================================================
+
+  // Repeat / new customers
+  repeat_customers_count(rows, plan) {
+    const r = rows[0] || {};
+    return `${(plan && plan.timeframe && plan.timeframe.label) || 'In window'}: ${intish(r.repeat_customers)} repeat customer(s) out of ${intish(r.purchasing_customers)} purchasing customers.`;
+  },
+  new_customers_count(rows, plan) {
+    const r = rows[0] || {};
+    return `${(plan && plan.timeframe && plan.timeframe.label) || 'In window'}: ${intish(r.new_customers)} first-time customer(s) out of ${intish(r.purchasing_customers)} purchasing customers.`;
+  },
+  repeat_customers_share(rows, plan) {
+    const r = rows[0] || {};
+    const num = Number(r.repeat_customers || 0);
+    const den = Number(r.purchasing_customers || 0);
+    const pct = den ? (num / den) * 100 : 0;
+    return `${(plan && plan.timeframe && plan.timeframe.label) || 'In window'}: ${intish(num)} of ${intish(den)} purchasing customers (${pct.toFixed(1)}%) were repeat customers.`;
+  },
+  new_customers_share(rows, plan) {
+    const r = rows[0] || {};
+    const num = Number(r.new_customers || 0);
+    const den = Number(r.purchasing_customers || 0);
+    const pct = den ? (num / den) * 100 : 0;
+    return `${(plan && plan.timeframe && plan.timeframe.label) || 'In window'}: ${intish(num)} of ${intish(den)} purchasing customers (${pct.toFixed(1)}%) were first-time customers.`;
+  },
+
+  customers_count_purchasing(rows, plan) {
+    const r = rows[0] || {};
+    const label = (plan && plan.timeframe && plan.timeframe.label) || 'In window';
+    return `${label}: ${intish(r.purchasing_customers)} distinct purchasing customers across ${intish(r.orders)} orders (${money(r.net_revenue)}). Note: based on purchase records, not foot traffic.`;
+  },
+
+  // Busiest hour / pattern
+  busiest_hour(rows, plan) {
+    if (!rows.length) return `No orders${windowLabel(plan)}.`;
+    const top = rows[0];
+    const fmt = (h) => `${((h + 11) % 12) + 1}${h < 12 ? ' AM' : ' PM'}`;
+    const all = rows.slice(0, 6).map((r) => `${fmt(r.hour_of_day)}: ${intish(r.orders)} orders / ${money(r.net_revenue)}`);
+    return `Busiest hour${windowLabel(plan)} was ${fmt(top.hour_of_day)} with ${intish(top.orders)} orders (${money(top.net_revenue)}). Top hours:\n${all.join('\n')}`;
+  },
+  busiest_period_pattern(rows) {
+    if (!rows.length) return 'Not enough order history for a busy-time pattern.';
+    const top = rows.slice(0, 5);
+    const fmt = (h) => `${((h + 11) % 12) + 1}${h < 12 ? ' AM' : ' PM'}`;
+    const lines = top.map((r) => `${r.day_of_week} ${fmt(r.hour_of_day)} — ${intish(r.orders)} orders (${money(r.net_revenue)})`);
+    return `Typical peak hours (last 12 weeks):\n${lines.join('\n')}`;
+  },
+
+  // Price extremes
+  highest_priced_item_sold(rows, plan) {
+    if (!rows.length) return `No items sold${windowLabel(plan)}.`;
+    const r = rows[0];
+    return `Highest-priced item sold${windowLabel(plan)}: ${r.product_title}${r.variant_title ? ' · ' + r.variant_title : ''} at ${money(r.unit_price)} on ${shortDate(r.occurred_at)}${r.customer_name ? ' (' + r.customer_name + ')' : ''}.`;
+  },
+  lowest_priced_item_sold(rows, plan) {
+    if (!rows.length) return `No items sold${windowLabel(plan)}.`;
+    const r = rows[0];
+    return `Lowest-priced item sold${windowLabel(plan)}: ${r.product_title}${r.variant_title ? ' · ' + r.variant_title : ''} at ${money(r.unit_price)} on ${shortDate(r.occurred_at)}${r.customer_name ? ' (' + r.customer_name + ')' : ''}.`;
+  },
+  buyer_of_highest_priced_item(rows, plan) {
+    if (!rows.length) return `No items sold${windowLabel(plan)}.`;
+    const r = rows[0];
+    return `${windowLabel(plan).replace(/[() ]/g, '').replace(/^./, (c) => c.toUpperCase()) || 'Window'}: the customer who bought the most expensive item was ${r.customer_name || r.customer_email || '(unknown)'} — ${r.product_title} at ${money(r.unit_price)}.`;
+  },
+  buyer_of_lowest_priced_item(rows, plan) {
+    if (!rows.length) return `No items sold${windowLabel(plan)}.`;
+    const r = rows[0];
+    return `${windowLabel(plan).replace(/[() ]/g, '').replace(/^./, (c) => c.toUpperCase()) || 'Window'}: the customer who bought the cheapest item was ${r.customer_name || r.customer_email || '(unknown)'} — ${r.product_title} at ${money(r.unit_price)}.`;
+  },
+
+  // Customer preference
+  customer_top_products(rows, plan) {
+    if (!rows.length) return 'No purchases on record.';
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    const top = rows.slice(0, 5).map((r, i) => `${i + 1}. ${r.product_title} — ${intish(r.units)} units · ${money(r.spend)}`);
+    return `${who || 'Customer'} top products${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+  customer_top_vendors(rows, plan) {
+    if (!rows.length) return 'No vendor purchases on record.';
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    const top = rows.slice(0, 5).map((r, i) => `${i + 1}. ${r.vendor} — ${money(r.spend)} (${intish(r.units)} units)`);
+    return `${who || 'Customer'} top vendors${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+  customer_top_categories(rows, plan) {
+    if (!rows.length) return 'No category data on record.';
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    const top = rows.slice(0, 5).map((r, i) => `${i + 1}. ${r.category} — ${money(r.spend)} (${intish(r.units)} units)`);
+    return `${who || 'Customer'} top categories${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  // Cadence
+  customer_frequency_profile(rows, plan) {
+    const r = rows[0] || {};
+    const who = plan && plan.resolved && plan.resolved.customer && plan.resolved.customer.customer_name;
+    if (!r.order_count) return `${who || 'Customer'} has no orders on record.`;
+    if (r.order_count === 1) {
+      return `${who || 'Customer'} has 1 order on record (${shortDate(r.first_order_at)}). No cadence yet.`;
+    }
+    return `${who || 'Customer'} typically shops every ${r.avg_days_between_orders}d. Lifetime ${intish(r.order_count)} orders from ${shortDate(r.first_order_at)} to ${shortDate(r.last_order_at)} (last seen ${intish(r.days_since_last_order)}d ago).`;
+  },
+
+  lapsed_frequent_customers(rows, plan) {
+    if (!rows.length) return 'No lapsed frequent customers found.';
+    const top = rows.slice(0, 8).map((r) => `${nameOrEmail(r)} — ${intish(r.order_count)} orders, ${money(r.total_spend)}, last seen ${intish(r.days_since_last_order)}d ago`);
+    return `Lapsed frequent customers (${rows.length}):\n${top.join('\n')}`;
+  },
+
+  customer_reactivation_candidates(rows) {
+    if (!rows.length) return 'No recent reactivations detected.';
+    const top = rows.slice(0, 8).map((r) => `${r.customer_name || r.email || '(unknown)'} — came back ${shortDate(r.last_at)} after ${Math.round(Number(r.gap_days || 0))}d away`);
+    return `Reactivation candidates (${rows.length}):\n${top.join('\n')}`;
+  },
+
+  // Type / category / varietal
+  type_top_seller(rows, plan) {
+    if (!rows.length) return `No sales${windowLabel(plan)}.`;
+    const top = rows[0];
+    const lines = rows.slice(0, 8).map((r, i) => `${i + 1}. ${r.type} — ${intish(r.units)} units · ${money(r.revenue)}`);
+    return `Top-selling type${windowLabel(plan)}: ${top.type} (${intish(top.units)} units). All:\n${lines.join('\n')}`;
+  },
+  type_breakdown(rows, plan) {
+    if (!rows.length) return `No sales${windowLabel(plan)}.`;
+    const lines = rows.slice(0, 12).map((r) => `${r.type} — ${intish(r.units)} units · ${money(r.revenue)} · ${intish(r.orders)} orders`);
+    return `Units sold by type${windowLabel(plan)}:\n${lines.join('\n')}`;
+  },
+  varietal_ranking(rows, plan) {
+    if (!rows.length) return `No varietals sold${windowLabel(plan)}.`;
+    const lines = rows.slice(0, 12).map((r, i) => `${i + 1}. ${r.varietal} — ${intish(r.units)} units · ${money(r.revenue)}`);
+    return `Top varietals${windowLabel(plan)}:\n${lines.join('\n')}`;
+  },
+
+  // Share / mix
+  share_of_sales_by_filter(rows, plan) {
+    const r = rows[0] || {};
+    const num = Number(r.numerator || 0);
+    const den = Number(r.denominator || 0);
+    const pct = den ? (num / den) * 100 : 0;
+    const what = (plan && plan.params && (plan.params.varietal || plan.params.color || plan.params.category || plan.params.vendor)) || 'filter';
+    return `${windowLabel(plan).slice(2, -1) || 'Window'}: ${money(num)} of ${money(den)} revenue (${pct.toFixed(1)}%) was from ${what}.`;
+  },
+  share_of_revenue_top_n(rows, plan) {
+    const r = rows[0] || {};
+    const num = Number(r.numerator || 0);
+    const den = Number(r.denominator || 0);
+    const pct = den ? (num / den) * 100 : 0;
+    return `Top ${r.top_n} products generated ${money(num)} of ${money(den)} (${pct.toFixed(1)}% of revenue)${windowLabel(plan)}.`;
+  },
+  share_of_dead_inventory_value(rows, plan) {
+    const r = rows[0] || {};
+    const num = Number(r.numerator || 0);
+    const den = Number(r.denominator || 0);
+    const pct = den ? (num / den) * 100 : 0;
+    const days = (plan && plan.params && plan.params.day_count) || 90;
+    return `Dead inventory (no sales in ${days}d) is ${money(num)} of ${money(den)} retail value (${pct.toFixed(1)}%).`;
+  },
+  share_of_orders_with_filter(rows, plan) {
+    const r = rows[0] || {};
+    const num = Number(r.numerator || 0);
+    const den = Number(r.denominator || 0);
+    const pct = den ? (num / den) * 100 : 0;
+    const what = (plan && plan.params && (plan.params.category || plan.params.varietal || plan.params.color)) || 'filter';
+    return `${intish(num)} of ${intish(den)} orders (${pct.toFixed(1)}%) included ${what}${windowLabel(plan)}.`;
+  },
+
+  // Dashboard
+  dashboard_summary(rows, plan) {
+    const kpi = rows.find((r) => r.bucket === 'kpi') || {};
+    const topProducts = rows.filter((r) => r.bucket === 'top_product');
+    const topVendors  = rows.filter((r) => r.bucket === 'top_vendor');
+    const lines = [];
+    lines.push(`📊 ${(plan && plan.timeframe && plan.timeframe.label) || 'Window'} dashboard`);
+    lines.push(`Revenue: ${money(kpi.revenue)} · Orders: ${intish(kpi.orders)} · Units: ${intish(kpi.units)} · AOV: ${money(kpi.aov)} · Customers: ${intish(kpi.customers)}`);
+    if (topProducts.length) {
+      lines.push('Top products:');
+      topProducts.slice(0, 5).forEach((r, i) => lines.push(`  ${i + 1}. ${r.label} — ${intish(r.units)} units · ${money(r.revenue)}`));
+    }
+    if (topVendors.length) {
+      lines.push('Top vendors:');
+      topVendors.slice(0, 5).forEach((r, i) => lines.push(`  ${i + 1}. ${r.label} — ${intish(r.units)} units · ${money(r.revenue)}`));
+    }
+    return lines.join('\n');
+  },
+
   // -------- inventory -----------------------------------------------------
   low_stock(rows) {
     if (!rows.length) return 'No low-stock variants right now.';

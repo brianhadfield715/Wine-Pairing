@@ -83,6 +83,110 @@ function extractTwoVarietals(q) {
 function classifyIntent(qRaw, ent = {}) {
   const q = qRaw.toLowerCase();
 
+  // ---- 00. Dashboard / executive summary (very explicit phrase) -----------
+  if (/\b(?:dashboard|executive\s+summary|key\s+metrics|kpi\s+dashboard|important\s+metrics|summarize\s+(?:last|this|the))\b/.test(q)) {
+    return 'dashboard_summary';
+  }
+
+  // ---- 01. Repeat / returning / first-time customers ----------------------
+  // Numerator/denominator-style share questions land in *_share intents;
+  // raw counts land in *_count intents.
+  const isShare = ent.shareIntent || /\bwhat\s+(?:percent|percentage|share|fraction)\b/.test(q);
+  if (ent.customerSegment === 'repeat' || /\b(?:repeat|returning)\s+(?:customers?|buyers?|shoppers?)\b/.test(q)) {
+    return isShare ? 'repeat_customers_share' : 'repeat_customers_count';
+  }
+  if (ent.customerSegment === 'new' || /\b(?:first[- ]?time|new)\s+(?:customers?|buyers?|shoppers?)\b/.test(q)) {
+    // "which customers are new this month" still routes to new_customers
+    // (lifetime first-order), but a count/share question goes here.
+    if (isShare || /^how\s+many\b/.test(q) || /\bcount\b/.test(q) || /\bcame\s+in\b/.test(q) || /\bwere\s+in\s+the\s+store\b/.test(q) || /\bbought\b.*\byesterday\b|\bbought\b.*\blast\b|\bbought\b.*\bthis\b/.test(q)) {
+      return isShare ? 'new_customers_share' : 'new_customers_count';
+    }
+  }
+
+  // ---- 02. Customer traffic-like counts ("how many customers came in") ---
+  // Only when no segment word is present (segment cases handled above).
+  if (
+    /how\s+many\s+(?:distinct\s+)?customers?\s+(?:came\s+in|were\s+in\s+the\s+store|bought|purchased|placed\s+orders?|shopped(?:\s+with\s+us)?)/.test(q)
+  ) {
+    return 'customers_count_purchasing';
+  }
+
+  // ---- 03. Busiest hour / typical busy period -----------------------------
+  if (/\b(?:what|which)\s+hour\s+(?:was|had|is)\s+(?:busiest|the\s+most|usually)/.test(q) ||
+      /\bwhat\s+(?:was|is)\s+(?:our\s+)?busiest\s+hour\b/.test(q) ||
+      /\bwhat\s+time\s+of\s+day\s+(?:was|is)\s+busiest\b/.test(q) ||
+      /\bwhat\s+hour\s+had\s+the\s+most\s+(?:orders|sales)\b/.test(q)) {
+    // Specific day if "yesterday/today/last X" → one-day busiest hour
+    if (ent.timeframeLike || /\b(?:today|yesterday|last\s+\w+|this\s+\w+|on\s+\d)/.test(q)) {
+      return 'busiest_hour';
+    }
+    return /\btypical|usually|on\s+average\b/.test(q) ? 'busiest_period_pattern' : 'busiest_hour';
+  }
+  if (/\btypically.*busiest|\busually.*busiest|\bbusiest\s+on\s+average\b|\bbusiest\s+.*\bon\s+average\b|\bpeak\s+(?:shopping\s+)?(?:hours?|times?)|\bbusiest\s+days?\s+and\s+times?|\bwhen\s+is\s+the\s+store\s+(?:usually\s+)?busiest|\bwhen\s+do\s+we\s+usually\s+sell\s+the\s+most|\bwhat\s+day\s+of\s+week\s+is\s+busiest\b/.test(q)) {
+    return 'busiest_period_pattern';
+  }
+
+  // ---- 04. Price extremes -------------------------------------------------
+  const wantsCheapest = /\b(?:cheapest|least\s+expensive|lowest[- ]?priced)\b/.test(q);
+  const wantsExpensive = /\b(?:most\s+expensive|highest[- ]?priced|priciest|priciest|sold\s+for\s+the\s+most)\b/.test(q);
+  const wantsBuyer    = /\b(?:who\s+(?:bought|purchased)|which\s+customer)\b/.test(q);
+  if (wantsCheapest || wantsExpensive) {
+    if (wantsBuyer) return wantsCheapest ? 'buyer_of_lowest_priced_item' : 'buyer_of_highest_priced_item';
+    return wantsCheapest ? 'lowest_priced_item_sold' : 'highest_priced_item_sold';
+  }
+
+  // ---- 05. Share / mix percentages (non-customer-segment) -----------------
+  if (isShare) {
+    if (/\bdead\s+inventory\b/.test(q)) return 'share_of_dead_inventory_value';
+    if (/\borders\s+included\b|\borders\s+containing\b/.test(q)) return 'share_of_orders_with_filter';
+    if (/\btop\s+(\d+)\s+products?\b|\btop\s+products?\b/.test(q)) return 'share_of_revenue_top_n';
+    // generic: percentage of revenue/units/sales came from <filter>
+    if (/\bof\s+(?:sales|revenue|units?|orders?)\b/.test(q)) return 'share_of_sales_by_filter';
+  }
+
+  // ---- 06. Customer preference ("X buys the most of...") ------------------
+  // Must fire BEFORE the haveCustomer block's customer_recent_purchases
+  // (which catches "what does X buy" too broadly).
+  if (ent.customer || ent.email) {
+    if (/what\s+(?:does|do|did)\s+.+\s+(?:buy|buys|bought|purchase|purchases|purchased|order|orders|ordered)\s+(?:the\s+)?most(?:\s+of)?(?:\s+often)?|what\s+(?:does|do|did)\s+.+\s+(?:usually|typically|normally|most\s+often)\s+(?:buy|drink|prefer|order|purchase)|favorite\s+products?|favorite\s+wines?|what\s+(?:varietal|vendor|product|category|wine|wines)\s+(?:does|do|did)\s+.+\s+(?:buy|purchase|like|prefer)|what\s+(?:varietal|vendor|product|category)\s+(?:is|are)\s+.+\s+favorite|what\s+wines?\s+(?:does|do|did)\s+.+\s+(?:usually|typically|normally)\s+(?:buy|drink|prefer|order)/.test(q)) {
+      // Vendor / varietal / category / product preference selection. "Wines"
+      // in this family maps to varietals because wines are the natural
+      // varietal axis in this store.
+      if (/\bvarietals?\b/.test(q) || /\bwines?\b/.test(q)) return 'customer_top_varietals';
+      if (/\bvendors?\b/.test(q))    return 'customer_top_vendors';
+      if (/\bcategor(?:y|ies)\b/.test(q)) return 'customer_top_categories';
+      return 'customer_top_products';
+    }
+  }
+
+  // ---- 07. Customer frequency / cadence -----------------------------------
+  if (ent.customer || ent.email) {
+    if (/\bhow\s+often\s+(?:does|do)\s+.+\s+(?:shop|order|buy|purchase)|\baverage\s+time\s+between\s+orders|\bcadence\b/.test(q)) {
+      return 'customer_frequency_profile';
+    }
+  }
+  if (/\bwhich\s+customers\s+shop\s+(?:most\s+)?frequently|who\s+shops\s+(?:with\s+us\s+)?the\s+most\s+often|who\s+orders\s+most\s+often|which\s+customers\s+buy\s+(?:weekly|monthly)/.test(q)) {
+    return 'top_customers_by_order_count';
+  }
+  if (/\b(?:has\s+not|haven'?t)\s+shopped\s+in\s+a\s+while\s+that\s+previously\s+came\s+in\s+frequently|\bused\s+to\s+buy\s+often\s+but\s+(?:has|have)?\s*stopped|\blapsed\s+frequent\s+customers?|\bregulars?\s+but\s+(?:has|have)\s+gone\s+quiet|\bpreviously\s+active\s+customers?\s+(?:that|who)\s+have\s+not\s+purchased\s+recently|\bloyal\s+customers?\s+(?:that|who)\s+have\s+dropped\s+off|\btop\s+customers?\s+(?:that|who)\s+have\s+not\s+purchased\s+in\s+\d+\s+days/.test(q)) {
+    return 'lapsed_frequent_customers';
+  }
+  if (/\bcustomers?\s+(?:that\s+|who\s+)?came\s+back\s+after\s+being\s+inactive|reactivation\s+candidates?/.test(q)) {
+    return 'customer_reactivation_candidates';
+  }
+
+  // ---- 08. Type / category breakdown (storewide) --------------------------
+  // "what type sold the most" / "show me units by type/category" / "top varietals"
+  if (/\bwhat\s+(?:type|category)\s+(?:of\s+product\s+)?sold\s+the\s+most|\bwhich\s+(?:product\s+)?(?:type|category)\s+sold\s+the\s+most|\bwhat\s+types?\s+sold\b/.test(q)) {
+    return 'type_top_seller';
+  }
+  if (/\bshow\s+me\s+(?:how\s+many\s+)?units\s+(?:of\s+each\s+type|by\s+(?:type|category))|\bunits\s+sold\s+by\s+(?:type|category)|\bbreak\s+out\s+.+\s+by\s+(?:type|category|vendor)|\bshow\s+me\s+.+\s+by\s+(?:type|category|vendor)\s+in\s+a\s+table|\btable\s+of\s+units\s+sold\s+by\s+(?:type|category)/.test(q)) {
+    return 'type_breakdown';
+  }
+  if (/\b(?:top|best[- ]?selling)\s+\d*\s*varietals?\b|\bvarietal\s+ranking|\bwhich\s+varietals?\s+sold\s+the\s+most|\btop\s+\d+\s+varietals?\b|\bbest\s+varietals?\b/.test(q)) {
+    return 'varietal_ranking';
+  }
+
   // ---- 0. Meta / data-coverage questions ----------------------------------
   // These fire before everything else because their phrasing is unambiguous.
   if (
@@ -217,18 +321,25 @@ function classifyIntent(qRaw, ent = {}) {
   }
 
   // ---- B. Customer aggregates --------------------------------------------
-  // Order-count specific phrasings ("most often", "recurring", "frequent")
-  // beat the broader "buy the most" rule.
-  if (/which\s+customers?\s+buy\s+(?:the\s+)?most\s+often|most\s+frequent\s+customers?|recurring\s+customers?|strongest\s+recurring/.test(q)) {
+  // *Explicit* order-count phrasings beat the broader "top customers" rule.
+  if (
+    /(?:rank|top)\s+customers?\s+(?:by|with\s+the\s+most)\s+(?:order\s+count|orders?|frequency)|top\s+\d+\s+customers?\s+by\s+order\s+count|which\s+customers?\s+(?:buy|shop)\s+(?:the\s+)?most\s+often|most\s+frequent\s+customers?|recurring\s+customers?|strongest\s+recurring|which\s+customers?\s+placed\s+the\s+most\s+orders|who\s+(?:orders|ordered|shops|shopped)\s+(?:the\s+)?most\s+often/.test(q)
+  ) {
     return 'top_customers_by_order_count';
   }
   if (/highest\s+average\s+order\s+value|highest\s+aov|biggest\s+spenders\s+per\s+order/.test(q)) {
     return 'top_customers_by_aov';
   }
+  // Lapsed-frequent customers must fire BEFORE generic "top customers" so
+  // "which top customers have not purchased in 60 days" doesn't get eaten.
+  if (/\b(?:has\s+not|haven'?t)\s+shopped\s+in\s+a\s+while\s+that\s+previously\s+came\s+in\s+frequently|\bused\s+to\s+buy\s+often\s+but\s+(?:has|have)?\s*stopped|\blapsed\s+frequent\s+customers?|\bregulars?\s+but\s+(?:has|have)\s+gone\s+quiet|\bpreviously\s+active\s+customers?\s+(?:that|who)\s+have\s+not\s+purchased\s+recently|\bloyal\s+customers?\s+(?:that|who)\s+have\s+dropped\s+off|\b(?:top\s+|loyal\s+|previously\s+(?:active\s+|frequent\s+)?)customers?\s+(?:that|who)?\s*have\s+not\s+purchased\s+in\s+\d+\s+days/.test(q)) {
+    return 'lapsed_frequent_customers';
+  }
   if (/(top|biggest|highest|best).*(spend|customer|buyer|spender)/.test(q) ||
-      /who\s+(?:spends|buys|purchases|bought|drinks?|drank)\s+(?:the\s+)?most/.test(q) ||
+      /who\s+(?:spends|spent|buys|purchases|purchased|bought|drinks?|drank)\s+(?:the\s+)?most/.test(q) ||
       /which\s+customers?\s+(?:spend|spent|buy|bought|drink|drank)\s+(?:the\s+)?most/.test(q) ||
       /which\s+customers?\s+buy\s+mostly/.test(q) ||
+      /which\s+customer\s+spent\s+the\s+most/.test(q) ||
       /best customers/.test(q) ||
       /top\s+(?:chardonnay|pinot\s+noir|cabernet|merlot|riesling|sparkling|red|white|rose|rosé)\s+(?:customers?|buyers?)/.test(q) ||
       /(?:top|best)\s+customers?\s+for\b/.test(q)) {
@@ -256,7 +367,7 @@ function classifyIntent(qRaw, ent = {}) {
 
   // ---- C. Basket / affinity ----------------------------------------------
   if (
-    /what sells together|sold together|bought together|buy together|purchased together|commonly sold together|commonly bought together|most commonly sold together|basket pairs|market basket|affinity|wines? (?:are )?usually bought together|skus? (?:are )?usually bought together/.test(q)
+    /what sells together|sold together|bought together|buy together|purchased together|commonly sold together|commonly bought together|most commonly sold together|basket pairs|market basket|affinity|wines? (?:are )?usually bought together|skus? (?:are )?usually bought together|items?\s+sell\s+together\s+the\s+most|products?\s+sell\s+together\s+the\s+most|products?\s+are\s+bought\s+together\s+the\s+most|items?\s+(?:are\s+)?most\s+commonly\s+bought\s+together|products?\s+pair\s+together\s+(?:most\s+)?often/.test(q)
   ) {
     return 'basket_pairs';
   }
@@ -339,7 +450,9 @@ function classifyIntent(qRaw, ent = {}) {
   }
   // Period over period — must run BEFORE varietal_performance which catches
   // "how is X doing this quarter".
-  if (/period[- ]over[- ]period|vs\s+(?:last|previous)\s+(?:week|month|quarter|year|day)|compared\s+to\s+(?:last|previous|the\s+prior)|this\s+(?:week|month|quarter|year)\s+(?:compared|vs)\s+(?:last|previous)|sales\s+yesterday\s+compared\s+to\s+the\s+prior\s+day|what\s+(?:improved|declined)\s+(?:this|last)\s+(?:week|month|quarter|year)\s+versus/.test(q)) {
+  if (
+    /period[- ]over[- ]period|vs\s+(?:last|previous)\s+(?:week|month|quarter|year|day)|compared?\s+to\s+(?:last|previous|the\s+prior|the\s+week\s+before|the\s+month\s+before|the\s+quarter\s+before|the\s+year\s+before)|\bcompare\s+(?:last|this|sales|revenue)\b.*\b(?:to|vs|versus|with)\s+(?:the\s+(?:week|month|quarter|year)\s+before|the\s+prior|last|previous)|this\s+(?:week|month|quarter|year)\s+(?:compared|vs)\s+(?:last|previous)|sales\s+yesterday\s+compared\s+to\s+the\s+prior\s+day|what\s+(?:improved|declined)\s+(?:this|last)\s+(?:week|month|quarter|year)\s+versus|how\s+did\s+(?:last|this)\s+(?:week|month|quarter|year)\s+compare(?:d)?\s+(?:to|with)\s+(?:the\s+)?(?:week|month|quarter|year)\s+before|how\s+did\s+(?:last|this)\s+(?:week|month|quarter|year)\s+compare(?:d)?\s+(?:to|with)\s+(?:the\s+)?(?:prior|previous)\s+(?:week|month|quarter|year)|was\s+last\s+(?:week|month|quarter|year)\s+better\s+than\s+the\s+(?:week|month|quarter|year)\s+before|how\s+were\s+sales\s+last\s+\w+\s+versus|how\s+did\s+we\s+do\s+last\s+\w+\s+compared\s+with|compare\s+sales\s+this\s+\w+\s+vs/.test(q)
+  ) {
     return 'period_over_period';
   }
   // Varietal performance — checks specific named varietals AND the plural
@@ -371,22 +484,30 @@ function classifyIntent(qRaw, ent = {}) {
   }
 
   // ---- H. Time-windowed views & storewide totals --------------------------
-  if (/recent orders|orders (yesterday|today|last|this)|what orders/.test(q)) {
+  // Tightened: require "recent orders" OR a strong "show me orders" form so
+  // questions like "which customers placed the most orders last month" don't
+  // get eaten.
+  if (/\brecent\s+orders?\b|\bshow\s+me\s+(?:recent\s+)?orders?\b|\bwhat\s+orders\s+came\s+in\b|\borders\s+(?:from\s+)?(?:yesterday|today)\b/.test(q)) {
     return 'recent_orders';
   }
   // Storewide sales / revenue / units / orders / aov questions.
   // We deliberately fire LAST so customer / product / vendor scopes win
   // when their entity hints are present.
   if (
-    /how\s+much\s+(?:did|have|has)\s+(?:we|i)\s+(?:sell|sold|make|made)/.test(q) ||
+    // "how much (did|have|has) we sell" — optionally with a noun between
+    // ("how much liquor did we sell").
+    /how\s+much\s+(?:[a-z][a-z\- ]{0,30}\s+)?(?:did|have|has)\s+we\s+(?:sell|sold|make|made)/.test(q) ||
     /what\s+(?:did|do)\s+we\s+do\b/.test(q) ||
-    /what\s+(?:were|was|is)\s+(?:our\s+)?(?:total\s+sales|net\s+sales|revenue|store\s+sales|total\s+revenue|sales)\b/.test(q) ||
+    // "what were liquor/spirit/beer/gift sales last week" / "what were total
+    // sales / net sales / store sales / revenue last week"
+    /what\s+(?:were|was|is)\s+(?:our\s+)?(?:[a-z][a-z\- ]{0,30}\s+)?(?:total\s+sales|net\s+sales|revenue|store\s+sales|total\s+revenue|sales)\b/.test(q) ||
     /^(?:total\s+)?(?:store\s+)?sales\b/.test(q) ||
     /\b(?:month|quarter|year)[- ]to[- ]date\s+(?:sales|revenue)\b/.test(q) ||
     /^(?:total\s+)?revenue\b/.test(q) ||
     /\bnet\s+sales\b/.test(q) ||
     /\btotal\s+sales\b/.test(q) ||
-    /how\s+many\s+(?:units?|items?|bottles?|cases?)\s+did\s+we\s+sell/.test(q) ||
+    // "how many <noun?> units/items/bottles/cases did we sell"
+    /how\s+many\s+(?:[a-z][a-z\- ]{0,30}\s+)?(?:units?|items?|bottles?|cases?)\s+did\s+we\s+sell/.test(q) ||
     /how\s+many\s+orders?\s+did\s+we\s+(?:have|get|receive)/.test(q) ||
     /what\s+was\s+(?:our\s+)?average\s+order\s+value/.test(q) ||
     /\baverage\s+order\s+value\b/.test(q) ||
@@ -494,6 +615,10 @@ function parse(questionRaw, { now } = {}) {
     customerHint: ent.customer,
     email: ent.email,
     productHint: ent.productHint,
+    outputMode: ent.outputMode,           // 'chart' | 'table' | null
+    chartType: ent.chartType,             // 'bar' | 'line' | 'pie' | 'donut' | 'stacked_bar' | null
+    customerSegment: ent.customerSegment, // 'repeat' | 'new' | null
+    shareIntent: ent.shareIntent,         // boolean
     scope: deriveScope(intent, ent),
   };
 

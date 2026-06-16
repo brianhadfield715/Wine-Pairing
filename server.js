@@ -162,6 +162,293 @@ function buildReason(profile, title, cat) {
   if (!bits.length) bits.push(`${cat} wine that fits the dish`);
   return `${title} — ${bits.join(', ')}.`;
 }
+function stripHtml(html) {
+  return String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function daysAgoIso(days) {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toISOString();
+}
+
+async function fetchAllProducts() {
+  const out = [];
+  let url = `${API}/products.json?limit=250&status=active`;
+  while (url) {
+    const res = await fetch(url, {
+      headers: { 'X-Shopify-Access-Token': TOKEN }
+    });
+    const data = await res.json();
+    if (!data.products) break;
+    out.push(...data.products);
+    const link = res.headers.get('link') || '';
+    const next = link.match(/<([^>]+)>;\s*rel="next"/);
+    url = next ? next[1] : null;
+  }
+  return out;
+}
+
+async function fetchCustomers(limit = 250) {
+  const res = await fetch(`${API}/customers.json?limit=${limit}`, {
+    headers: { 'X-Shopify-Access-Token': TOKEN }
+  });
+  const data = await res.json();
+  return data.customers || [];
+}
+
+async function fetchOrders(days = 30, limit = 250) {
+  const createdAtMin = encodeURIComponent(daysAgoIso(days));
+  const res = await fetch(
+    `${API}/orders.json?status=any&limit=${limit}&created_at_min=${createdAtMin}`,
+    {
+      headers: { 'X-Shopify-Access-Token': TOKEN }
+    }
+  );
+  const data = await res.json();
+  return data.orders || [];
+}
+
+function getWineColor(product) {
+  const text = `${product.product_type || ''} ${product.tags || ''} ${product.title || ''}`.toLowerCase();
+  if (/sparkling|champagne|prosecco|cava|brut/.test(text)) return 'sparkling';
+  if (/rose|rosé/.test(text)) return 'rose';
+  if (/orange/.test(text)) return 'orange';
+  if (/white|chardonnay|sauvignon blanc|riesling|chenin|viognier|pinot grigio|albarino|vermentino/.test(text)) return 'white';
+  if (/red|pinot noir|cabernet|merlot|syrah|grenache|tempranillo|gamay|sangiovese|malbec|zinfandel/.test(text)) return 'red';
+  return 'unknown';
+}
+
+function extractWineKeyword(question) {
+  const q = question.toLowerCase();
+  const patterns = [
+    'chardonnay',
+    'pinot noir',
+    'cabernet',
+    'merlot',
+    'sauvignon blanc',
+    'riesling',
+    'chenin',
+    'viognier',
+    'tempranillo',
+    'gamay',
+    'grenache',
+    'sparkling',
+    'rose',
+    'rosé',
+    'orange wine',
+    'white wine',
+    'red wine'
+  ];
+  return patterns.find(p => q.includes(p)) || null;
+}
+
+function extractDays(question, fallback = 30) {
+  const match = question.match(/last\s+(\d+)\s+day/);
+  if (match) return parseInt(match[1], 10);
+  if (/yesterday/.test(question)) return 1;
+  if (/last week/.test(question)) return 7;
+  if (/last month/.test(question)) return 30;
+  return fallback;
+}
+
+function answerInventoryQuestion(question, products) {
+  const q = question.toLowerCase();
+
+  if (/low stock/.test(q)) {
+    const rows = [];
+    products.forEach(p => {
+      (p.variants || []).forEach(v => {
+        const qty = v.inventory_quantity || 0;
+        if (qty > 0 && qty <= 6) {
+          rows.push({
+            title: p.title,
+            sku: v.sku || '',
+            qty,
+            price: v.price
+          });
+        }
+      });
+    });
+    rows.sort((a, b) => a.qty - b.qty);
+    return {
+      answer: `Found ${rows.length} low-stock variants.`,
+      data: rows.slice(0, 20)
+    };
+  }
+
+  if (/out of stock/.test(q)) {
+    const rows = [];
+    products.forEach(p => {
+      (p.variants || []).forEach(v => {
+        const qty = v.inventory_quantity || 0;
+        if (qty <= 0) {
+          rows.push({
+            title: p.title,
+            sku: v.sku || '',
+            qty
+          });
+        }
+      });
+    });
+    return {
+      answer: `Found ${rows.length} out-of-stock variants.`,
+      data: rows.slice(0, 20)
+    };
+  }
+
+  const wineKeyword = extractWineKeyword(q);
+
+  if (/in stock/.test(q) || /under \$?\d+/.test(q) || /white|red|rose|rosé|sparkling|orange/.test(q)) {
+    const budgetMatch = q.match(/under \$?(\d+)/);
+    const budget = budgetMatch ? parseFloat(budgetMatch[1]) : null;
+
+    let rows = [];
+    products.forEach(p => {
+      const color = getWineColor(p);
+      const text = `${p.title} ${p.product_type || ''} ${p.tags || ''} ${stripHtml(p.body_html)}`.toLowerCase();
+
+      if (wineKeyword && !text.includes(wineKeyword)) return;
+      if (q.includes('white') && color !== 'white') return;
+      if (q.includes('red') && color !== 'red') return;
+      if (q.includes('sparkling') && color !== 'sparkling') return;
+      if ((q.includes('rose') || q.includes('rosé')) && color !== 'rose') return;
+      if (q.includes('orange') && color !== 'orange') return;
+
+      (p.variants || []).forEach(v => {
+        const qty = v.inventory_quantity || 0;
+        const price = parseFloat(v.price || 0);
+        if (qty <= 0) return;
+        if (budget && price > budget) return;
+        rows.push({
+          title: p.title,
+          sku: v.sku || '',
+          qty,
+          price: v.price,
+          url: `https://${SHOP}/products/${p.handle}`
+        });
+      });
+    });
+
+    rows.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
+    return {
+      answer: `Found ${rows.length} matching in-stock variants.`,
+      data: rows.slice(0, 20)
+    };
+  }
+
+  return null;
+}
+
+function answerCustomerOrderQuestion(question, customers, orders) {
+  const q = question.toLowerCase();
+  const wineKeyword = extractWineKeyword(q);
+
+  if (/what orders came in/.test(q) || /orders yesterday/.test(q) || /orders last/.test(q)) {
+    const rows = orders.map(o => ({
+      order: o.name,
+      created_at: o.created_at,
+      customer: o.customer ? `${o.customer.first_name || ''} ${o.customer.last_name || ''}`.trim() : '',
+      total_price: o.total_price
+    }));
+    return {
+      answer: `Found ${rows.length} matching orders.`,
+      data: rows.slice(0, 20)
+    };
+  }
+
+  if ((/customers bought/.test(q) || /who bought/.test(q)) && wineKeyword) {
+    const matched = [];
+    orders.forEach(o => {
+      const found = (o.line_items || []).some(li =>
+        `${li.title || ''} ${li.variant_title || ''}`.toLowerCase().includes(wineKeyword)
+      );
+      if (found && o.customer) {
+        matched.push({
+          customer: `${o.customer.first_name || ''} ${o.customer.last_name || ''}`.trim(),
+          email: o.customer.email || '',
+          order: o.name,
+          created_at: o.created_at
+        });
+      }
+    });
+
+    const unique = [];
+    const seen = new Set();
+    matched.forEach(r => {
+      const key = `${r.email}|${r.order}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(r);
+      }
+    });
+
+    return {
+      answer: `Found ${unique.length} matching customer/order records for ${wineKeyword}.`,
+      data: unique.slice(0, 20)
+    };
+  }
+
+  if (/customer count|how many customers/.test(q)) {
+    return {
+      answer: `Found ${customers.length} customers in the fetched sample.`,
+      data: customers.slice(0, 10).map(c => ({
+        name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+        email: c.email || ''
+      }))
+    };
+  }
+
+  return null;
+}
+
+app.post('/shopify-qa', async (req, res) => {
+  try {
+    const question = String((req.body && req.body.question) || '').trim();
+    if (!question) {
+      return res.json({ answer: 'Ask a Shopify data question.', data: [] });
+    }
+
+    const q = question.toLowerCase();
+    const days = extractDays(q, 30);
+
+    const needOrders = /order|bought|customer|yesterday|last week|last month|last \d+ day/.test(q);
+    const needCustomers = /customer|customers|buyer|buyers/.test(q);
+
+    const products = await fetchAllProducts();
+    const inventoryAnswer = answerInventoryQuestion(q, products);
+    if (inventoryAnswer) {
+      return res.json({
+        question,
+        domain: 'products_inventory',
+        answer: inventoryAnswer.answer,
+        data: inventoryAnswer.data
+      });
+    }
+
+    const customers = needCustomers ? await fetchCustomers(250) : [];
+    const orders = needOrders ? await fetchOrders(days, 250) : [];
+    const customerOrderAnswer = answerCustomerOrderQuestion(q, customers, orders);
+
+    if (customerOrderAnswer) {
+      return res.json({
+        question,
+        domain: 'customers_orders',
+        answer: customerOrderAnswer.answer,
+        data: customerOrderAnswer.data
+      });
+    }
+
+    return res.json({
+      question,
+      domain: 'unknown',
+      answer: 'I could not classify that question yet. Try asking about in-stock products, low stock, out-of-stock products, customers who bought a wine, or recent orders.',
+      data: []
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 

@@ -22,6 +22,7 @@
     "smoke:manager:v5": "node scripts/smoke_manager_qa_v5.js",
     "smoke:84":         "node scripts/smoke_84_queries.js",
     "smoke:56":         "node scripts/smoke_56_queries.js",
+    "smoke:33":         "node scripts/smoke_33_failures.js",
     "smoke:all": "node scripts/smoke.js && node scripts/smoke_basket_live.js && node scripts/smoke_orders_sync.js && node scripts/smoke_manager_qa.js && node scripts/smoke_manager_qa_v2.js && node scripts/smoke_manager_qa_v3.js && node scripts/smoke_manager_qa_v4.js && node scripts/smoke_manager_qa_v5.js && node scripts/smoke_84_queries.js && node scripts/smoke_56_queries.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

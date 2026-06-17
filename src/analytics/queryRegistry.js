@@ -289,6 +289,18 @@ const registry = {
   orders_single_line_item:       { builder: b.ordersWithMultipleLines,     describe: '(alias) — same SQL, formatter shows single-item count.',    domain: 'orders' },
   guest_checkout_orders:         { builder: b.guestCheckoutOrders,         describe: 'Orders with no attached customer record.',                  domain: 'orders' },
   email_subscriber_orders:       { builder: b.emailSubscriberOrders,       describe: 'Orders where customer accepts_marketing = true.',           domain: 'orders' },
+
+  // --- v8 (Round-4 33-failure fix) ---------------------------------------
+  sku_top_seller:                { builder: b.skuTopSeller,                describe: 'Top SKUs / variants by units sold in window.',              domain: 'sales' },
+  data_date_range:               { builder: b.dataDateRange,                describe: 'Earliest & latest order dates and total count.',            domain: 'meta' },
+  data_sync_status:              { builder: b.dataSyncStatus,               describe: 'How fresh the synced data is.',                             domain: 'meta' },
+  oldest_order_date:             { builder: b.oldestOrderDate,              describe: 'Date of the very first order.',                             domain: 'meta' },
+  newest_order_date:             { builder: b.newestOrderDate,              describe: 'Date of the most recent order.',                            domain: 'meta' },
+  customer_first_last_order:     { builder: b.customerFirstLastOrder,       describe: 'First/last order dates for a single resolved customer.',    domain: 'customers', needsCustomer: true },
+  customer_unique_count:         { builder: b.customerUniqueCount,          describe: 'Distinct purchasing customers + total + guest counts.',     domain: 'customers' },
+  products_on_sale:              { builder: b.productsOnSale,               describe: 'Variants where compare_at_price > price (i.e. on sale).',   domain: 'sales' },
+  top_customers_by_units_purchased: { builder: b.topCustomersByUnitsPurchased, describe: 'Top customers ranked by units (not dollars).',          domain: 'customers' },
+  new_vs_returning_by_month:     { builder: b.newVsReturningByMonth,        describe: 'Monthly time-series of new vs returning purchasing customers.', domain: 'customers' },
 };
 
 function get(intent) { return registry[intent] || null; }

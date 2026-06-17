@@ -4239,6 +4239,184 @@ function emailSubscriberOrders(p) {
   return { text, values: w.values, meta: { domain: 'orders' } };
 }
 
+// ===========================================================================
+// v8 builders (Round-4 33-failure fix)
+// ===========================================================================
+
+// 1) sku_top_seller — units by SKU (handles "what SKU sold the most", "top variant")
+function skuTopSeller(p) {
+  const limit = p.limit && p.limit > 0 ? Math.min(50, p.limit) : 10;
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')} and` : 'where';
+  const text = `
+    select fs.sku,
+           max(fs.product_title) as product_title,
+           max(fs.variant_title) as variant_title,
+           max(fs.vendor)        as vendor,
+           sum(fs.quantity)::int as units_sold,
+           coalesce(sum(fs.net_revenue), 0)::numeric(14,2) as net_revenue,
+           count(distinct fs.order_id)::int as orders
+      from fact_sales fs
+     ${where} fs.sku is not null and fs.sku <> ''
+     group by fs.sku
+     order by units_sold desc nulls last
+     limit ${limit}
+  `;
+  return { text, values: w.values, meta: { domain: 'sales' } };
+}
+
+// 2) data_date_range — earliest/latest/total orders
+function dataDateRange() {
+  const text = `
+    select min(created_at)::timestamptz as oldest,
+           max(created_at)::timestamptz as newest,
+           count(*)::int                 as total_orders,
+           extract(epoch from (max(created_at) - min(created_at)))/86400 as span_days
+      from orders
+  `;
+  return { text, values: [], meta: { domain: 'meta' } };
+}
+
+// 3) data_sync_status — newest order's synced_at and newest order's created_at
+function dataSyncStatus() {
+  const text = `
+    select max(synced_at)::timestamptz                                     as last_sync_at,
+           max(created_at)::timestamptz                                     as newest_order_at,
+           extract(epoch from (now() - max(synced_at)))/3600                as hours_since_sync,
+           extract(epoch from (now() - max(created_at)))/3600               as hours_since_newest_order,
+           count(*)::int                                                    as total_orders
+      from orders
+  `;
+  return { text, values: [], meta: { domain: 'meta' } };
+}
+
+// 4) customer_by_name_lookup — header for one customer.
+//    Engine sets plan.resolved.customer; this is the "first/last order"
+//    one-row response shared by "when was X's first order" and "when was X's last order".
+function customerFirstLastOrder(p) {
+  const cid = p.resolved && p.resolved.customer && p.resolved.customer.customer_id;
+  if (!cid) return { text: 'select null where false', values: [], meta: { domain: 'customers' } };
+  const text = `
+    select c.id as customer_id,
+           trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')) as customer_name,
+           c.email,
+           min(coalesce(o.processed_at, o.created_at))::timestamptz as first_order_at,
+           max(coalesce(o.processed_at, o.created_at))::timestamptz as last_order_at,
+           count(o.id)::int                              as order_count,
+           coalesce(sum(o.total_price), 0)::numeric(14,2) as total_spent
+      from customers c
+      left join orders o on o.customer_id = c.id and o.cancelled_at is null
+     where c.id = $1
+     group by c.id, c.first_name, c.last_name, c.email
+  `;
+  return { text, values: [cid], meta: { domain: 'customers' } };
+}
+
+// 5) customer_unique_count — distinct customers from orders + customers table
+function customerUniqueCount() {
+  const text = `
+    select (select count(*) from customers)::int                                            as total_customers,
+           (select count(distinct customer_id) from orders where customer_id is not null
+              and cancelled_at is null)::int                                                 as purchasing_customers,
+           (select count(*) from orders where customer_id is null and cancelled_at is null)::int as guest_orders
+  `;
+  return { text, values: [], meta: { domain: 'customers' } };
+}
+
+// 6) products_on_sale — compare_at_price > price
+function productsOnSale(p) {
+  const limit = p.limit && p.limit > 0 ? Math.min(50, p.limit) : 25;
+  const text = `
+    select p.id as product_id, p.title, p.vendor,
+           v.sku, v.title as variant_title,
+           v.price, v.compare_at_price,
+           (v.compare_at_price - v.price)::numeric(12,2) as discount_amount,
+           round(((v.compare_at_price - v.price) / nullif(v.compare_at_price, 0)) * 100, 1) as discount_pct
+      from variants v
+      join products p on p.id = v.product_id
+     where v.compare_at_price is not null
+       and v.price is not null
+       and v.compare_at_price > v.price
+       and v.price > 0
+     order by discount_pct desc nulls last
+     limit ${limit}
+  `;
+  return { text, values: [], meta: { domain: 'sales' } };
+}
+
+// 7) top_customers_by_units_purchased — same shape as top_customers_by_spend but ranked by units
+function topCustomersByUnitsPurchased(p) {
+  const limit = p.limit || 10;
+  const tf = p.timeframe;
+  const w = windowFragments('fs.occurred_at', tf, 1);
+  const values = [...w.values, limit];
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select fs.customer_id,
+           max(c.email)                                                            as email,
+           max(trim(coalesce(c.first_name,'') || ' ' || coalesce(c.last_name,'')))  as customer_name,
+           sum(fs.quantity)::int                                                   as units,
+           coalesce(sum(fs.net_revenue), 0)::numeric(14,2)                          as total_spend,
+           count(distinct fs.order_id)::int                                         as order_count
+      from fact_sales fs
+      left join customers c on c.id = fs.customer_id
+     ${where}
+       ${w.fragments.length ? 'and' : 'where'} fs.customer_id is not null
+     group by fs.customer_id
+     order by units desc nulls last
+     limit $${w.nextIdx}
+  `;
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+// 8) new_vs_returning_by_month — monthly time-series of new vs returning purchasing customers
+function newVsReturningByMonth(p) {
+  // Default: last 12 months when no timeframe.
+  let tf = p.timeframe;
+  if (!tf || tf.mode === 'all_time') {
+    const now = new Date();
+    tf = {
+      mode: 'window',
+      sinceIso: new Date(now - 365 * 86400e3).toISOString(),
+      untilIso: now.toISOString(),
+      label: 'last 12 months (default)',
+      days: 365,
+    };
+  }
+  const text = `
+    with first_per as (
+      select customer_id,
+             min(coalesce(processed_at, created_at)) as first_at
+        from orders
+       where customer_id is not null and cancelled_at is null
+       group by customer_id
+    ),
+    activity as (
+      select distinct
+             date_trunc('month', coalesce(o.processed_at, o.created_at)) as bucket,
+             o.customer_id
+        from orders o
+       where o.customer_id is not null
+         and o.cancelled_at is null
+         and coalesce(o.processed_at, o.created_at) >= $1::timestamptz
+         and coalesce(o.processed_at, o.created_at) <  $2::timestamptz
+    )
+    select a.bucket,
+           count(*) filter (where date_trunc('month', f.first_at) = a.bucket)::int      as new_customers,
+           count(*) filter (where date_trunc('month', f.first_at) < a.bucket)::int      as returning_customers,
+           count(*)::int                                                                 as purchasing_customers
+      from activity a
+      join first_per f on f.customer_id = a.customer_id
+     group by a.bucket
+     order by a.bucket asc
+  `;
+  return { text, values: [tf.sinceIso, tf.untilIso], meta: { domain: 'customers', timeframe: tf, grain: 'month' } };
+}
+
+// 9) oldest_order_date / newest_order_date — share data_date_range but the formatter picks
+function oldestOrderDate() { return dataDateRange(); }
+function newestOrderDate() { return dataDateRange(); }
+
 module.exports = {
   // customers
   topCustomersBySpend,
@@ -4462,4 +4640,15 @@ module.exports = {
   ordersWithMultipleLines,
   guestCheckoutOrders,
   emailSubscriberOrders,
+  // v8 (Round-4)
+  skuTopSeller,
+  dataDateRange,
+  dataSyncStatus,
+  customerFirstLastOrder,
+  customerUniqueCount,
+  productsOnSale,
+  topCustomersByUnitsPurchased,
+  newVsReturningByMonth,
+  oldestOrderDate,
+  newestOrderDate,
 };

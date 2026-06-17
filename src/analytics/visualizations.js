@@ -33,6 +33,21 @@ const VISUAL_DEFAULTS = {
   top_items_by_units:       { chart_type: 'bar',   x_field: 'product_title', y_field: 'units_sold' },
   top_items_by_revenue:     { chart_type: 'bar',   x_field: 'product_title', y_field: 'net_revenue' },
   top_vendors:              { chart_type: 'bar',   x_field: 'vendor', y_field: 'net_revenue' },
+  // Bug D: top-customer charts must use customer_name as the x-axis label and
+  // total_spend as the y-axis value (NOT customer_id which is just a bigint).
+  top_customers_by_spend:        { chart_type: 'bar', x_field: 'customer_name', y_field: 'total_spend' },
+  top_customers_by_order_count:  { chart_type: 'bar', x_field: 'customer_name', y_field: 'order_count' },
+  top_customers_by_aov:          { chart_type: 'bar', x_field: 'customer_name', y_field: 'average_order_value' },
+  top_customers_by_varietal:     { chart_type: 'bar', x_field: 'customer_name', y_field: 'spend' },
+  top_customers_by_vendor:       { chart_type: 'bar', x_field: 'customer_name', y_field: 'spend' },
+  top_customers_by_units_purchased: { chart_type: 'bar', x_field: 'customer_name', y_field: 'units' },
+  // v8
+  sku_top_seller:           { chart_type: 'bar',  x_field: 'sku',           y_field: 'units_sold' },
+  new_vs_returning_by_month:{ chart_type: 'line', x_field: 'bucket',        y_field: 'new_customers' },
+  products_on_sale:         { chart_type: null /* table */, x_field: null, y_field: null },
+  customer_first_last_order:{ chart_type: null /* text */,  x_field: null, y_field: null },
+  data_date_range:          { chart_type: null /* text */,  x_field: null, y_field: null },
+  data_sync_status:         { chart_type: null /* text */,  x_field: null, y_field: null },
   inventory_value_by_vendor:{ chart_type: 'bar',   x_field: 'vendor', y_field: 'retail_value' },
   inventory_value_by_category: { chart_type: 'bar', x_field: 'category', y_field: 'retail_value' },
   vendor_growth:            { chart_type: 'bar',   x_field: 'vendor', y_field: 'revenue_delta' },
@@ -110,11 +125,21 @@ function build(intent, rows, plan) {
     const sample = rows && rows[0];
     if (sample) {
       const keys = Object.keys(sample);
-      const numericKey = keys.find((k) => typeof sample[k] === 'number' || (typeof sample[k] === 'string' && /^-?\d+(\.\d+)?$/.test(sample[k])));
-      const labelKey = keys.find((k) => typeof sample[k] === 'string' && !/^-?\d+(\.\d+)?$/.test(sample[k]));
-      out.x_field = labelKey || keys[0];
-      out.y_field = numericKey || keys[1];
-      out.value_format = /revenue|spend|price|value/.test(out.y_field || '') ? 'currency' : 'integer';
+      // Skip identifier-shaped columns for both axes so customer_id / order_id
+      // / product_id are never used as labels or bar heights.
+      const ID_KEYS = new Set(['customer_id', 'order_id', 'product_id', 'variant_id', 'line_item_id', 'sku', 'id']);
+      const meaningfulNumeric = (k) => !ID_KEYS.has(k) && (
+        typeof sample[k] === 'number' ||
+        (typeof sample[k] === 'string' && /^-?\d+(\.\d+)?$/.test(sample[k]))
+      );
+      const meaningfulLabel = (k) => !ID_KEYS.has(k) &&
+        typeof sample[k] === 'string' &&
+        !/^-?\d+(\.\d+)?$/.test(sample[k]);
+      const numericKey = keys.find(meaningfulNumeric);
+      const labelKey = keys.find(meaningfulLabel);
+      out.x_field = labelKey || keys.find((k) => !ID_KEYS.has(k)) || keys[0];
+      out.y_field = numericKey || keys.find((k) => !ID_KEYS.has(k) && k !== out.x_field) || keys[1];
+      out.value_format = /revenue|spend|price|value|total/.test(out.y_field || '') ? 'currency' : 'integer';
     }
   }
 

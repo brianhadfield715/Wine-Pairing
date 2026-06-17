@@ -167,13 +167,21 @@ async function answer(question) {
         };
       }
       if (r.status === 'not_found') {
+        // Bug A: if an email was provided but didn't match, say so clearly
+        // instead of falling back to "I need a customer name or email".
+        let msg;
+        if (parsed.params.email) {
+          msg = `No customer found matching email "${parsed.params.email}". Double-check the address, or try the customer's name.`;
+        } else if (parsed.params.customerHint) {
+          msg = `No customer found matching "${parsed.params.customerHint}". Try the exact email, or a fuller name.`;
+        } else {
+          msg = 'I need a customer name or email to answer that.';
+        }
         return {
           question,
           intent: parsed.intent,
           domain: entry.domain,
-          answer: parsed.params.customerHint
-            ? `No customer found matching "${parsed.params.customerHint}". Try the exact email, or a fuller name.`
-            : 'I need a customer name or email to answer that.',
+          answer: msg,
           data: [],
           meta: { status: 'not_found', resolution: { customer: r } },
         };

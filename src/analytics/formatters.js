@@ -1605,6 +1605,84 @@ const F = {
     }
     return `${intish(r.orders)} orders came from email subscribers${windowLabel(plan)} (${intish(r.customers)} distinct subscribers, ${money(r.revenue)} in revenue).`;
   },
+
+  // ===== v8 formatters (Round-4) ==========================================
+
+  sku_top_seller(rows, plan) {
+    if (!rows.length) return `No SKU sales${windowLabel(plan)}.`;
+    const lines = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.sku} — ${r.product_title}${r.variant_title && r.variant_title !== 'Default Title' ? ' · ' + r.variant_title : ''} — ${intish(r.units_sold)} units (${money(r.net_revenue)})`
+    );
+    return `Top SKUs by units${windowLabel(plan)}:\n${lines.join('\n')}`;
+  },
+
+  data_date_range(rows) {
+    const r = rows[0] || {};
+    if (!r.oldest) return 'No order data on file.';
+    const span = Math.round(Number(r.span_days || 0));
+    return `Order data covers ${shortDate(r.oldest)} through ${shortDate(r.newest)} (${intish(r.total_orders)} orders across ${intish(span)} days).`;
+  },
+
+  data_sync_status(rows) {
+    const r = rows[0] || {};
+    if (!r.last_sync_at) return 'No sync data on file.';
+    const h = Number(r.hours_since_sync || 0);
+    const hOrder = Number(r.hours_since_newest_order || 0);
+    const fresh = h < 24 ? 'fresh' : h < 72 ? 'a bit stale' : 'stale';
+    const daysSince = (h / 24).toFixed(1);
+    return `Data was last synced ${shortDate(r.last_sync_at)} (${daysSince} days ago — ${fresh}). Newest order in DB: ${shortDate(r.newest_order_at)} (${(hOrder / 24).toFixed(1)} days ago). ${intish(r.total_orders)} orders total.`;
+  },
+
+  oldest_order_date(rows) {
+    const r = rows[0] || {};
+    if (!r.oldest) return 'No order data.';
+    return `Our first order was on ${shortDate(r.oldest)}.`;
+  },
+
+  newest_order_date(rows) {
+    const r = rows[0] || {};
+    if (!r.newest) return 'No order data.';
+    return `Our most recent order was on ${shortDate(r.newest)}.`;
+  },
+
+  customer_first_last_order(rows, plan) {
+    const r = rows[0] || {};
+    const who = r.customer_name || r.email || '(unknown)';
+    if (!r.first_order_at) return `${who} has no orders on file.`;
+    return `${who} — first order ${shortDate(r.first_order_at)} · last order ${shortDate(r.last_order_at)} · ${intish(r.order_count)} orders · ${money(r.total_spent)} lifetime.`;
+  },
+
+  customer_unique_count(rows) {
+    const r = rows[0] || {};
+    return `You have ${intish(r.total_customers)} customers on file. ${intish(r.purchasing_customers)} have placed an order. ${intish(r.guest_orders)} orders were guest checkouts (no customer attached).`;
+  },
+
+  products_on_sale(rows) {
+    if (!rows.length) return 'No products are currently on sale (compare_at_price > price).';
+    const top = rows.slice(0, 12).map((r, i) =>
+      `${i + 1}. ${r.title}${r.variant_title && r.variant_title !== 'Default Title' ? ' · ' + r.variant_title : ''} — was ${money(r.compare_at_price)}, now ${money(r.price)} (-${r.discount_pct || 0}%)`
+    );
+    return `Products on sale (${rows.length}):\n${top.join('\n')}`;
+  },
+
+  top_customers_by_units_purchased(rows, plan) {
+    if (!rows.length) return 'No customers found.';
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.customer_name || r.email || '#' + r.customer_id} — ${intish(r.units)} units (${money(r.total_spend)}, ${intish(r.order_count)} orders)`
+    );
+    return `Top customers by units purchased${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  new_vs_returning_by_month(rows, plan) {
+    if (!rows.length) return `No customer activity in window.`;
+    const lines = rows.map((r) => {
+      const month = new Date(r.bucket).toISOString().slice(0, 7);
+      const total = Number(r.purchasing_customers || 0);
+      const newPct = total ? ((Number(r.new_customers) / total) * 100).toFixed(1) : '0.0';
+      return `${month}: ${intish(r.new_customers)} new · ${intish(r.returning_customers)} returning (${newPct}% new)`;
+    });
+    return `New vs returning customers by month:\n${lines.join('\n')}`;
+  },
 };
 
 function format(intent, rows, plan) {

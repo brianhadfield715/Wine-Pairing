@@ -85,6 +85,102 @@ function classifyIntent(qRaw, ent = {}) {
 
   // =========================================================================
   // =========================================================================
+  // V8 priority block (Round-4 33-failure fix).
+  // =========================================================================
+
+  // -- data coverage / sync freshness (clear, anchored phrasings) ----------
+  if (/\bwhen\s+did\s+we\s+last\s+sync\b|\blast\s+data\s+sync(\s+time)?\b|\bdata\s+last\s+updated\b|\bhow\s+fresh\s+is\s+(?:your|the|our)?\s*data\b|\bwhen\s+was\s+data\s+last\s+refreshed\b|\bhow\s+recent\s+is\s+(?:your|the|our)?\s*data\b/.test(q)) {
+    return 'data_sync_status';
+  }
+  if (/\bwhat\s+is\s+(?:the\s+)?date\s+range\s+of\s+(?:the\s+)?data\b|\bwhat\s+date\s+range\s+does\s+(?:your|the|our)?\s*data\s+cover\b|\bhow\s+old\s+is\s+(?:your|the|our)?\s*data\b|\bhow\s+far\s+back\s+does\s+(?:your|the|our)?\s*data\s+(?:go|cover)\b|\bdata\s+(?:in\s+)?(?:your|the|our)?\s*system\b|\bdate\s+coverage\b|\bwhat\s+date\s+does\s+(?:your|the|our)?\s*data\s+go\s+back\s+to\b/.test(q)) {
+    return 'data_date_range';
+  }
+
+  // -- when was our first / last order (storewide) -------------------------
+  // NB: only fires when no specific customer name was extracted (otherwise
+  // we want the per-customer first/last order intent below). We also exclude
+  // "per customer" phrasings which mean a different intent.
+  if (!(ent.customer || ent.email) && !/\bper\s+customer\b/.test(q)) {
+    if (/\bwhen\s+was\s+(?:our|the)\s+first\s+order\b|\b(?:our|the)\s+first\s+order\b|\bfirst\s+order\s+(?:ever|of\s+all\s+time)\b/.test(q)) {
+      return 'oldest_order_date';
+    }
+    if (/\bwhen\s+was\s+(?:our|the)\s+(?:last|most\s+recent)\s+order\b|\b(?:our|the)\s+(?:last|most\s+recent)\s+order\b|\b(?:last|most\s+recent)\s+order\s+ever\b/.test(q)) {
+      return 'newest_order_date';
+    }
+  }
+
+  // -- per-customer first / last order date (when X named) ----------------
+  if ((ent.customer || ent.email) &&
+      (/\bwhen\s+was\s+.+\s+first\s+order\b/.test(q) ||
+       /\bwhen\s+was\s+.+\s+last\s+order\b/.test(q) ||
+       /\bfirst\s+order\s+for\s+.+\b/.test(q) ||
+       /\blast\s+order\s+for\s+.+\b/.test(q))) {
+    return 'customer_first_last_order';
+  }
+  // -- bare-email "<email> last order" / "<email> first order"
+  if (ent.email && /\b(?:last|first)\s+order\b/.test(q)) {
+    return 'customer_first_last_order';
+  }
+
+  // -- unique customer count ---------------------------------------------
+  if (/\bhow\s+many\s+(?:unique|distinct)\s+customers\s+(?:do\s+we\s+have|total|exist|are\s+there)\b|\b(?:total|number\s+of)\s+(?:unique|distinct)\s+customers\b/.test(q)) {
+    return 'customer_unique_count';
+  }
+
+  // -- products on sale --------------------------------------------------
+  if (/\b(?:products?|items?|variants?)\s+(?:on\s+sale|discounted|marked\s+down|with\s+(?:a\s+)?discount|reduced)\b|\bdiscounted\s+products?\b|\bproducts?\s+with\s+a\s+discount\b/.test(q)) {
+    return 'products_on_sale';
+  }
+
+  // -- SKU / variant top seller (granularity switch) ----------------------
+  if (/\b(?:what|which|top)\s+(?:sku|skus|variant|variants|item\s+number|article)\s+(?:sold|sells|have\s+we\s+sold|did\s+we\s+sell)\s+(?:the\s+)?most\b/.test(q) ||
+      /\btop\s+(?:sku|skus|variant|variants)\b/.test(q) ||
+      /\bwhat\s+sku\s+have\s+we\s+sold\s+the\s+most\s+of\b/.test(q) ||
+      /\b(?:which|what)\s+sku\s+sold\s+the\s+most\b/.test(q)) {
+    return 'sku_top_seller';
+  }
+
+  // -- top customers by UNITS purchased ----------------------------------
+  // "who bought / has bought / ordered the most units"
+  if (/\b(?:who|which\s+customer)\s+(?:has\s+)?(?:bought|ordered|purchased)\s+(?:the\s+)?most\s+units\b/.test(q) ||
+      /\bcustomers\s+by\s+(?:total\s+)?units\b/.test(q) ||
+      /\bwhich\s+customer\s+has\s+the\s+most\s+units\b/.test(q) ||
+      /\btop\s+customers\s+by\s+units\b/.test(q)) {
+    return 'top_customers_by_units_purchased';
+  }
+
+  // -- new vs returning customers by month --------------------------------
+  if (/\b(?:chart|graph|plot|show|breakdown)\s+(?:of\s+)?new\s+vs\s+returning\s+customer(?:s)?\b|\bnew\s+vs\s+returning\s+customers?\s+by\s+(?:day|week|month)\b/.test(q)) {
+    return 'new_vs_returning_by_month';
+  }
+
+  // -- "what did we sell the most of" / "what sold the most" → top items
+  if (/\bwhat\s+(?:did\s+we\s+sell\s+(?:the\s+)?most\s+of|sold\s+(?:the\s+)?most)\b/.test(q)) {
+    if (ent.metric === 'revenue') return 'top_items_by_revenue';
+    return 'top_items_by_units';
+  }
+
+  // -- "what product types do we sell" / "what categories do we have" -----
+  if (/\bwhat\s+product\s+types?\s+do\s+we\s+sell\b|\blist\s+all\s+product\s+categor(?:y|ies)\b|\bwhat\s+categor(?:y|ies)\s+do\s+we\s+(?:have|sell|carry)\b/.test(q)) {
+    return 'what_products_do_we_sell';
+  }
+
+  // -- "chart of sales [period]" → sales_time_series with explicit chart ----
+  if (/\b(?:chart|graph|plot|visual)\s+of\s+sales\b/.test(q)) {
+    return 'sales_time_series';
+  }
+
+  // -- "trending products this/last X" → trending_up (period implicit) ----
+  if (/\btrending\s+products?\b(?!\s+down)/.test(q)) {
+    return 'trending_up';
+  }
+
+  // -- "average order to delivery time" / "how long does shipping take" ---
+  if (/\b(?:average|avg)\s+order(?:\s+to)?\s+(?:delivery|shipping)\s+time\b|\bhow\s+long\s+does\s+(?:shipping|delivery|fulfillment)\s+take\b/.test(q)) {
+    return 'avg_days_to_ship';
+  }
+
+  // =========================================================================
   // V7 priority block (Round-3 56-query upgrade).
   // Add these BEFORE the v6 block so the new precise phrasings win over the
   // broader v6 catch-alls.

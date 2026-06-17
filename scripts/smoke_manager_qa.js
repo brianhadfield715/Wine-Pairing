@@ -166,7 +166,8 @@ const cases = [
   ['what sold most yesterday',                 'top_items_by_units'],
   ['top wines yesterday',                      'top_items_by_units'],
   ['top items by revenue last month',          'top_items_by_revenue'],
-  ['What are the top SKUs by units sold this month?', 'top_items_by_units'],
+  // v8: "top SKUs" now routes to the SKU-granular intent (was top_items_by_units)
+  ['What are the top SKUs by units sold this month?', 'sku_top_seller'],
   ['How much did John Smith spend last week?', 'customer_spend'],
   ['How much has John Smith spent all time?',  'customer_spend'],
   ['What has John Smith spent?',               'customer_spend'],

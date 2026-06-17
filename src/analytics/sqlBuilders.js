@@ -3455,6 +3455,790 @@ function capabilityUnsupported(p) {
   };
 }
 
+// ===========================================================================
+// v7 builders (Round-3 56-query upgrade)
+// All read existing schema + vw_orders_enriched. No re-sync required.
+// ===========================================================================
+
+function _w(col, tf, idx) { return windowFragments(col, tf, idx); }
+
+// 1) orders_by_period_count — count + total in window
+function ordersByPeriodCount(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')} and o.cancelled_at is null`
+                                   : `where o.cancelled_at is null`;
+  const text = `
+    select count(*)::int                                  as orders,
+           coalesce(sum(o.total_price), 0)::numeric(14,2) as revenue
+      from orders o
+     ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 2) orders_under_amount — total_price < threshold
+function ordersUnderAmount(p) {
+  const v = (p.money && p.money.op === '<' ? p.money.value : null) ||
+            (p.underAmount) || 50;
+  const w = _w('o.created_at', p.timeframe, 2);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int                                  as orders,
+           coalesce(sum(o.total_price), 0)::numeric(14,2) as revenue,
+           coalesce(avg(o.total_price), 0)::numeric(14,2) as avg_total
+      from orders o
+     where o.cancelled_at is null
+       and o.total_price < $1 ${where}
+  `;
+  return { text, values: [v, ...w.values], meta: { domain: 'orders', threshold: v } };
+}
+
+// 3) order_count_by_day — daily order count grouped
+function orderCountByDay(p) {
+  // Use the storewide time-series builder shape, force grain=day, metric=orders
+  const w = _w('occurred_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select date_trunc('day', occurred_at)            as bucket,
+           count(distinct order_id)::int             as orders,
+           coalesce(sum(net_revenue), 0)::numeric(14,2) as net_revenue,
+           coalesce(sum(quantity), 0)::int           as units
+      from fact_sales
+     ${where}
+     group by bucket
+     order by bucket asc
+  `;
+  return { text, values: w.values, meta: { domain: 'orders', grain: 'day' } };
+}
+
+// 5) orders_on_weekends — weekday ∈ {Sat, Sun}
+function ordersOnWeekends(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int                                  as orders,
+           coalesce(sum(o.total_price), 0)::numeric(14,2) as revenue
+      from orders o
+     where o.cancelled_at is null
+       and extract(dow from coalesce(o.processed_at, o.created_at)) in (0, 6)
+       ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 8) customer_most_orders — top-1 customer by order count
+function customerMostOrders() {
+  const text = `
+    select customer_id, customer_name, email,
+           order_count, total_spend, last_order_at
+      from dim_customer_profile
+     order by order_count desc nulls last
+     limit 5
+  `;
+  return { text, values: [], meta: { domain: 'customers' } };
+}
+
+// 9) customers_one_time_only_period — exactly one order in window
+function customersOneTimeOnlyPeriod(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    with per_customer as (
+      select o.customer_id, count(*) as orders, max(o.total_price) as max_total
+        from orders o
+       where o.customer_id is not null
+         and o.cancelled_at is null ${where}
+       group by o.customer_id
+    )
+    select count(*)::int as customers_one_time_only,
+           coalesce(avg(max_total), 0)::numeric(14,2) as avg_order_value
+      from per_customer
+     where orders = 1
+  `;
+  return { text, values: w.values, meta: { domain: 'customers' } };
+}
+
+// 10) customer_retention_rate — % of customers who ordered in window AND had prior orders
+function customerRetentionRate(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    with in_window as (
+      select distinct o.customer_id
+        from orders o
+       where o.customer_id is not null
+         and o.cancelled_at is null ${where}
+    ),
+    earliest as (
+      select customer_id, min(coalesce(processed_at, created_at)) as first_seen
+        from orders
+       where customer_id is not null and cancelled_at is null
+       group by customer_id
+    )
+    select
+      count(distinct iw.customer_id) filter (where ${p.timeframe && p.timeframe.sinceIso ? `e.first_seen < $${w.nextIdx}` : 'false'})::int as retained_customers,
+      count(distinct iw.customer_id)::int as purchasing_customers
+    from in_window iw
+    left join earliest e on e.customer_id = iw.customer_id
+  `;
+  const values = [...w.values];
+  if (p.timeframe && p.timeframe.sinceIso) values.push(p.timeframe.sinceIso);
+  return { text, values, meta: { domain: 'customers' } };
+}
+
+// 11) avg_days_between_orders — avg of (max-min)/(orders-1) per multi-order customer
+function avgDaysBetweenOrders() {
+  const text = `
+    with spans as (
+      select customer_id,
+             count(*) as orders,
+             min(coalesce(processed_at, created_at)) as first_at,
+             max(coalesce(processed_at, created_at)) as last_at
+        from orders
+       where customer_id is not null and cancelled_at is null
+       group by customer_id
+      having count(*) >= 2
+    )
+    select avg(extract(epoch from (last_at - first_at)) / 86400 / nullif(orders - 1, 0))::numeric(10,2)
+              as avg_days_between_orders,
+           count(*)::int as repeat_customers
+      from spans
+  `;
+  return { text, values: [], meta: { domain: 'customers' } };
+}
+
+// 12) bottom_products_by_units — varietal_ranking ASC
+function bottomProductsByUnits(p) {
+  const limit = p.limit && p.limit > 0 ? Math.min(50, p.limit) : 5;
+  const w = _w('fs.occurred_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select fs.product_title                                 as product,
+           sum(fs.quantity)::int                             as units,
+           coalesce(sum(fs.net_revenue), 0)::numeric(14,2)   as revenue,
+           count(distinct fs.order_id)::int                  as orders
+      from fact_sales fs
+     ${where}
+     group by 1
+     order by units asc, revenue asc
+     limit ${limit}
+  `;
+  return { text, values: w.values, meta: { domain: 'sales' } };
+}
+
+// 13) products_zero_sales_period — on-hand SKUs with 0 sales in window
+function productsZeroSalesPeriod(p) {
+  // Use dim_sku_profile.units_sold_30d when window is ~30d; else compute from fact_sales
+  const days = (p.timeframe && p.timeframe.days) || 30;
+  if (days === 30) {
+    const text = `
+      select sku, product_title, vendor, on_hand
+        from dim_sku_profile
+       where on_hand > 0
+         and coalesce(units_sold_30d, 0) = 0
+       order by on_hand desc
+       limit 25
+    `;
+    return { text, values: [], meta: { domain: 'inventory' } };
+  }
+  // General window
+  const since = new Date(Date.now() - days * 86400e3).toISOString();
+  const text = `
+    select v.sku, v.product_title, v.vendor, v.on_hand
+      from vw_current_inventory v
+     where v.on_hand > 0
+       and not exists (
+         select 1 from fact_sales fs
+          where fs.sku = v.sku
+            and fs.occurred_at >= $1::timestamptz
+       )
+     order by v.on_hand desc
+     limit 25
+  `;
+  return { text, values: [since], meta: { domain: 'inventory', days } };
+}
+
+// 14) newest_products_added_period — products.created_at in window
+function newestProductsAddedPeriod(p) {
+  const w = _w('created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select id as product_id, title, vendor, product_type, status, created_at
+      from products
+     ${where}
+     order by created_at desc nulls last
+     limit ${p.limit && p.limit > 0 ? Math.min(50, p.limit) : 20}
+  `;
+  return { text, values: w.values, meta: { domain: 'sales' } };
+}
+
+// 15) varietal_top_seller — winner only (top 1 by units, in window)
+function varietalTopSeller(p) {
+  const w = _w('fs.occurred_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select fs.product_title as varietal,
+           sum(fs.quantity)::int as units,
+           coalesce(sum(fs.net_revenue), 0)::numeric(14,2) as revenue
+      from fact_sales fs
+     ${where}
+     group by 1
+     order by units desc nulls last
+     limit 5
+  `;
+  return { text, values: w.values, meta: { domain: 'sales' } };
+}
+
+// 16) product_count_total
+function productCountTotal() {
+  const text = `
+    select count(*)::int as products,
+           count(*) filter (where status = 'active')::int as active_products,
+           (select count(*) from variants)::int as variants
+      from products
+  `;
+  return { text, values: [], meta: { domain: 'sales' } };
+}
+
+// 17) inventory_per_product_summary
+function inventoryPerProductSummary(p) {
+  const limit = p.limit && p.limit > 0 ? Math.min(100, p.limit) : 25;
+  const text = `
+    select product_title,
+           count(*)::int                  as variant_count,
+           coalesce(sum(on_hand), 0)::int as total_on_hand,
+           avg(price)::numeric(12,2)      as avg_price
+      from vw_current_inventory
+     where on_hand > 0
+     group by product_title
+     order by total_on_hand desc
+     limit ${limit}
+  `;
+  return { text, values: [], meta: { domain: 'inventory' } };
+}
+
+// 18) inventory_by_location_most — top location by units
+function inventoryByLocationMost() {
+  const text = `
+    select l.id as location_id, l.name as location_name,
+           coalesce(sum(ilc.available), 0)::int as on_hand_units,
+           count(distinct ilc.inventory_item_id)::int as inventory_items
+      from locations l
+      left join inventory_levels_current ilc on ilc.location_id = l.id
+     group by l.id, l.name
+     order by on_hand_units desc nulls last
+     limit 10
+  `;
+  return { text, values: [], meta: { domain: 'inventory' } };
+}
+
+// 19) avg_days_to_ship — AVG(first_fulfilled_at - created_at)
+function avgDaysToShip(p) {
+  const w = _w('created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      avg(extract(epoch from (first_fulfilled_at - created_at)) / 86400)::numeric(10,2) as avg_days,
+      count(*) filter (where first_fulfilled_at is not null)::int as orders,
+      bool_or(first_fulfilled_at is not null) as has_precise
+      from vw_orders_enriched
+     where cancelled_at is null ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 20) orders_same_day_shipped — fulfilled within 24h of creation
+function ordersSameDayShipped(p) {
+  const w = _w('created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int as orders,
+           coalesce(sum(total_price), 0)::numeric(14,2) as revenue
+      from vw_orders_enriched
+     where cancelled_at is null
+       and first_fulfilled_at is not null
+       and first_fulfilled_at - created_at <= interval '24 hours'
+       ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 21) orders_shipped_within_days
+function ordersShippedWithinDays(p) {
+  const days = p.shipWithinDays || 2;
+  const w = _w('created_at', p.timeframe, 2);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int as orders,
+           coalesce(sum(total_price), 0)::numeric(14,2) as revenue
+      from vw_orders_enriched
+     where cancelled_at is null
+       and first_fulfilled_at is not null
+       and first_fulfilled_at - created_at <= ($1 || ' days')::interval
+       ${where}
+  `;
+  return { text, values: [String(days), ...w.values], meta: { domain: 'orders', within_days: days } };
+}
+
+// 22) most_common_shipping_method
+function mostCommonShippingMethod(p) {
+  const w = _w('created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select coalesce(shipping_method_title, '(unknown)') as shipping_method,
+           count(*)::int                                 as orders,
+           coalesce(sum(shipping_cost), 0)::numeric(14,2) as shipping_revenue
+      from vw_orders_enriched
+     ${where}
+     group by 1
+     order by orders desc
+     limit 10
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 23) avg_shipping_cost_per_order
+function avgShippingCostPerOrder(p) {
+  const w = _w('created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select coalesce(avg(shipping_cost), 0)::numeric(10,2)  as avg_shipping,
+           coalesce(sum(shipping_cost), 0)::numeric(14,2)  as total_shipping,
+           count(*) filter (where shipping_cost is not null)::int as orders
+      from vw_orders_enriched
+     ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 24) orders_pending_shipment — created but never fulfilled
+function ordersPendingShipment(p) {
+  const w = _w('created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int as orders,
+           coalesce(sum(total_price), 0)::numeric(14,2) as revenue
+      from vw_orders_enriched
+     where cancelled_at is null
+       and first_fulfilled_at is null
+       and (lower(coalesce(fulfillment_status, '')) in ('', 'partial', 'unfulfilled', 'open'))
+       ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 25) orders_fulfilled_period — fulfilled within window (already via orders_shipped_this_window)
+
+// 26) avg_discount_per_order
+function avgDiscountPerOrder(p) {
+  const w = _w('created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select coalesce(avg(total_discounts), 0)::numeric(10,2)  as avg_discount,
+           coalesce(sum(total_discounts), 0)::numeric(14,2)  as total_discounts,
+           count(*) filter (where total_discounts > 0)::int   as discounted_orders,
+           count(*)::int                                       as orders
+      from orders
+     ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 27) refunds_amount_period — same shape as refund_rate_and_avg, formatter picks fields
+// 28) avg_refund_processing_time — covered by refund_rate_and_avg (avg_days_to_refund)
+// 29) products_most_refund_requests — already products_with_most_returns
+
+// 30) refund_trend_period — refunds per day in window
+function refundTrendPeriod(p) {
+  const w = _w('first_refund_at', p.timeframe, 1);
+  const where = w.fragments.length
+    ? `where ${w.fragments.join(' and ')} and refund_count > 0`
+    : `where refund_count > 0 and first_refund_at >= now() - interval '30 days'`;
+  const text = `
+    select date_trunc('day', first_refund_at)             as bucket,
+           count(*)::int                                   as refunds,
+           coalesce(sum(refund_amount), 0)::numeric(14,2)  as refund_amount
+      from vw_orders_enriched
+     ${where}
+     group by 1
+     order by 1 asc
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 31) total_refunded_period — sum refund_amount in window
+function totalRefundedPeriod(p) {
+  const w = _w('first_refund_at', p.timeframe, 1);
+  const where = w.fragments.length
+    ? `where ${w.fragments.join(' and ')} and refund_count > 0`
+    : `where refund_count > 0`;
+  const text = `
+    select count(*)::int                                   as refunded_orders,
+           coalesce(sum(refund_amount), 0)::numeric(14,2)  as refund_total
+      from vw_orders_enriched
+     ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 33) orders_between_hours
+function ordersBetweenHours(p) {
+  const a = p.hourStart != null ? p.hourStart : 18;
+  const b = p.hourEnd != null ? p.hourEnd : 21;
+  const w = _w('created_at', p.timeframe, 3);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int as orders,
+           coalesce(sum(total_price), 0)::numeric(14,2) as revenue
+      from orders
+     where cancelled_at is null
+       and extract(hour from coalesce(processed_at, created_at)) >= $1
+       and extract(hour from coalesce(processed_at, created_at)) < $2
+       ${where}
+  `;
+  return { text, values: [a, b, ...w.values], meta: { domain: 'orders', hour_start: a, hour_end: b } };
+}
+
+// 35) compare_product_sales_periods — top-10 products this window vs prior equal-length
+function compareProductSalesPeriods(p) {
+  let tf = p.timeframe;
+  if (!tf || tf.mode === 'all_time') {
+    const now = new Date();
+    tf = { mode: 'window', sinceIso: new Date(now - 30*86400e3).toISOString(), untilIso: now.toISOString(), days: 30 };
+  }
+  const widthMs = new Date(tf.untilIso) - new Date(tf.sinceIso);
+  const priorSince = new Date(new Date(tf.sinceIso).getTime() - widthMs).toISOString();
+  const priorUntil = tf.sinceIso;
+  const text = `
+    with cur as (
+      select fs.product_title,
+             sum(fs.quantity)::int as units,
+             sum(fs.net_revenue)::numeric(14,2) as revenue
+        from fact_sales fs
+       where fs.occurred_at >= $1::timestamptz and fs.occurred_at < $2::timestamptz
+       group by 1
+    ),
+    prev as (
+      select fs.product_title,
+             sum(fs.quantity)::int as units,
+             sum(fs.net_revenue)::numeric(14,2) as revenue
+        from fact_sales fs
+       where fs.occurred_at >= $3::timestamptz and fs.occurred_at < $4::timestamptz
+       group by 1
+    )
+    select coalesce(cur.product_title, prev.product_title) as product,
+           coalesce(cur.units, 0)::int                     as units_current,
+           coalesce(prev.units, 0)::int                    as units_previous,
+           (coalesce(cur.units, 0) - coalesce(prev.units, 0))::int as units_delta,
+           coalesce(cur.revenue, 0)::numeric(14,2)         as revenue_current,
+           coalesce(prev.revenue, 0)::numeric(14,2)        as revenue_previous
+      from cur full outer join prev using (product_title)
+     order by units_delta desc nulls last
+     limit 15
+  `;
+  return { text, values: [tf.sinceIso, tf.untilIso, priorSince, priorUntil], meta: { domain: 'sales' } };
+}
+
+// 36) net_profit_after_refunds_discounts — net_revenue - refunds - discounts (no cost data)
+function netAfterRefundsDiscounts(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select
+      coalesce(sum(o.total_price), 0)::numeric(14,2)                  as gross,
+      coalesce(sum(o.total_discounts), 0)::numeric(14,2)              as discounts,
+      coalesce(sum(v.refund_amount), 0)::numeric(14,2)                as refunds,
+      coalesce(sum(o.total_tax), 0)::numeric(14,2)                    as tax,
+      (coalesce(sum(o.total_price), 0) - coalesce(sum(v.refund_amount), 0))::numeric(14,2)
+                                                                        as net_after_refunds,
+      count(*)::int                                                    as orders
+      from orders o
+      left join vw_orders_enriched v on v.order_id = o.id
+     ${where}
+       ${w.fragments.length ? 'and' : 'where'} o.cancelled_at is null
+  `;
+  return { text, values: w.values, meta: { domain: 'orders', has_cost_data: false } };
+}
+
+// 37) avg_tax_per_order — AVG(total_tax)
+function avgTaxPerOrder(p) {
+  const w = _w('created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select coalesce(avg(total_tax), 0)::numeric(10,2)  as avg_tax,
+           coalesce(sum(total_tax), 0)::numeric(14,2)  as total_tax,
+           count(*)::int                                as orders
+      from orders
+     ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 38) cross_sell_by_category — pairs of product_types co-occurring in same order
+function crossSellByCategory(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    with cats as (
+      select distinct o.id as order_id,
+             coalesce(nullif(p.product_type,''), '(unknown)') as category
+        from orders o
+        join order_line_items oli on oli.order_id = o.id
+        join products p on p.id = oli.product_id
+       where o.cancelled_at is null ${where}
+    )
+    select a.category as category_a,
+           b.category as category_b,
+           count(*)::int as orders_with_both
+      from cats a
+      join cats b on a.order_id = b.order_id and a.category < b.category
+     group by 1, 2
+     order by orders_with_both desc
+     limit 15
+  `;
+  return { text, values: w.values, meta: { domain: 'sales' } };
+}
+
+// 39) customers_medium_value — lifetime spend 100..500
+function customersMediumValue(p) {
+  const lo = p.spendMin != null ? p.spendMin : 100;
+  const hi = p.spendMax != null ? p.spendMax : 500;
+  const text = `
+    select count(*)::int                                  as customers,
+           coalesce(sum(total_spend), 0)::numeric(14,2)   as total_spend,
+           coalesce(avg(total_spend), 0)::numeric(14,2)   as avg_spend
+      from dim_customer_profile
+     where total_spend between $1 and $2
+  `;
+  return { text, values: [lo, hi], meta: { domain: 'customers', range: [lo, hi] } };
+}
+
+// 41) orders_never_fulfilled — fulfillment_status is null/unfulfilled and no first_fulfilled_at
+function ordersNeverFulfilled(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int                                  as orders,
+           coalesce(sum(o.total_price), 0)::numeric(14,2) as revenue
+      from orders o
+      left join vw_orders_enriched v on v.order_id = o.id
+     where o.cancelled_at is null
+       and v.first_fulfilled_at is null
+       and (lower(coalesce(o.fulfillment_status, '')) in ('', 'unfulfilled', 'partial', 'open'))
+       ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 42) completed_orders_period — fulfilled in window
+function completedOrdersPeriod(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int                                  as orders,
+           coalesce(sum(o.total_price), 0)::numeric(14,2) as revenue
+      from orders o
+     where o.cancelled_at is null
+       and lower(coalesce(o.fulfillment_status, '')) = 'fulfilled'
+       ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 43) all_discount_codes_used — distinct codes
+function allDiscountCodesUsed(p) {
+  const w = _w('v.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select distinct code
+      from vw_orders_enriched v,
+           unnest(coalesce(v.discount_codes, '{}'::text[])) as code
+     where coalesce(code, '') <> '' ${where}
+     order by code asc
+     limit 100
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 44) orders_grouped_by_discount_code — already top_discount_codes; alias-ready
+
+// 47) largest_line_item_by_quantity
+function largestLineItemByQuantity(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select oli.id as line_item_id,
+           oli.title as product_title,
+           oli.sku, oli.vendor,
+           oli.quantity, oli.price as unit_price,
+           o.name as order_name,
+           coalesce(o.processed_at, o.created_at) as occurred_at
+      from order_line_items oli
+      join orders o on o.id = oli.order_id
+     where o.cancelled_at is null ${where}
+     order by oli.quantity desc nulls last
+     limit 10
+  `;
+  return { text, values: w.values, meta: { domain: 'sales' } };
+}
+
+// 48) product_highest_avg_qty_per_order
+function productHighestAvgQty(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select oli.title as product_title,
+           avg(oli.quantity)::numeric(10,2) as avg_qty,
+           count(distinct oli.order_id)::int as orders,
+           sum(oli.quantity)::int            as total_qty
+      from order_line_items oli
+      join orders o on o.id = oli.order_id
+     where o.cancelled_at is null ${where}
+     group by oli.title
+    having count(distinct oli.order_id) >= 3
+     order by avg_qty desc nulls last
+     limit 15
+  `;
+  return { text, values: w.values, meta: { domain: 'sales' } };
+}
+
+// 49) orders_containing_product — substring match on line item title
+function ordersContainingProduct(p) {
+  const hint = (p.productContainsHint || p.varietal || '').toString();
+  if (!hint) {
+    return { text: 'select 0::int as orders, 0::int as line_items, 0::numeric(14,2) as revenue', values: [], meta: { domain: 'orders' } };
+  }
+  const w = _w('o.created_at', p.timeframe, 2);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(distinct o.id)::int                                  as orders,
+           count(*)::int                                                as line_items,
+           coalesce(sum(oli.quantity * oli.price), 0)::numeric(14,2)   as revenue
+      from orders o
+      join order_line_items oli on oli.order_id = o.id
+     where o.cancelled_at is null
+       and (lower(oli.title) like lower($1) or lower(oli.variant_title) like lower($1))
+       ${where}
+  `;
+  return { text, values: [`%${hint}%`, ...w.values], meta: { domain: 'orders', match: hint } };
+}
+
+// 50) orders_pending_over_days
+function ordersPendingOverDays(p) {
+  const d = p.pendingOverDays || 3;
+  const text = `
+    select count(*)::int                                  as orders,
+           coalesce(sum(total_price), 0)::numeric(14,2)   as revenue
+      from vw_orders_enriched
+     where cancelled_at is null
+       and first_fulfilled_at is null
+       and created_at < now() - ($1 || ' days')::interval
+  `;
+  return { text, values: [String(d)], meta: { domain: 'orders', threshold_days: d } };
+}
+
+// 51) repeat_purchase_rate_period — % of customers in window who had ≥2 orders in window
+function repeatPurchaseRatePeriod(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    with per_customer as (
+      select customer_id, count(*) as orders
+        from orders o
+       where customer_id is not null and o.cancelled_at is null ${where}
+       group by customer_id
+    )
+    select count(*) filter (where orders >= 2)::int as repeat_customers,
+           count(*)::int                              as purchasing_customers
+      from per_customer
+  `;
+  return { text, values: w.values, meta: { domain: 'customers' } };
+}
+
+// 52) avg_time_between_repeat_purchases — avg gap from 1st to 2nd order for multi-order customers
+function avgTimeBetweenRepeat(p) {
+  // For each customer with ≥2 orders we take the gap between their first
+  // and second orders. Storewide lifetime; window optional.
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    with ranked as (
+      select o.customer_id,
+             coalesce(o.processed_at, o.created_at) as at,
+             row_number() over (partition by o.customer_id
+                                order by coalesce(o.processed_at, o.created_at)) as rn
+        from orders o
+       where o.customer_id is not null and o.cancelled_at is null ${where}
+    ),
+    gaps as (
+      select customer_id,
+             extract(epoch from (max(at) filter (where rn = 2) - max(at) filter (where rn = 1))) / 86400 as gap_days
+        from ranked
+       where rn in (1, 2)
+       group by customer_id
+      having max(rn) = 2
+    )
+    select avg(gap_days)::numeric(10,2) as avg_days,
+           count(*)::int                  as repeat_customers
+      from gaps
+  `;
+  return { text, values: w.values, meta: { domain: 'customers' } };
+}
+
+// 53) orders_with_multiple_line_items
+function ordersWithMultipleLines(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    with per_order as (
+      select o.id, count(*) as items
+        from orders o
+        join order_line_items oli on oli.order_id = o.id
+       where o.cancelled_at is null ${where}
+       group by o.id
+    )
+    select count(*) filter (where items >= 2)::int as multi_item_orders,
+           count(*) filter (where items = 1)::int   as single_item_orders,
+           count(*)::int                              as total_orders
+      from per_order
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 54) orders_single_line_item — same SQL, formatter picks different field
+
+// 55) guest_checkout_orders — orders with customer_id IS NULL
+function guestCheckoutOrders(p) {
+  const w = _w('created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int                                  as orders,
+           coalesce(sum(total_price), 0)::numeric(14,2)   as revenue
+      from orders
+     where customer_id is null
+       and cancelled_at is null
+       ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
+// 56) email_subscriber_orders — orders where customers.raw.accepts_marketing = true
+function emailSubscriberOrders(p) {
+  const w = _w('o.created_at', p.timeframe, 1);
+  const where = w.fragments.length ? `and ${w.fragments.join(' and ')}` : '';
+  const text = `
+    select count(*)::int                                  as orders,
+           coalesce(sum(o.total_price), 0)::numeric(14,2) as revenue,
+           count(distinct o.customer_id)::int             as customers
+      from orders o
+      join customers c on c.id = o.customer_id
+     where o.cancelled_at is null
+       and coalesce((c.raw->>'accepts_marketing')::boolean, false) = true
+       ${where}
+  `;
+  return { text, values: w.values, meta: { domain: 'orders' } };
+}
+
 module.exports = {
   // customers
   topCustomersBySpend,
@@ -3635,4 +4419,47 @@ module.exports = {
   weekOverWeek,
   yearOverYear,
   capabilityUnsupported,
+  // v7 (56-query round 3)
+  ordersByPeriodCount,
+  ordersUnderAmount,
+  orderCountByDay,
+  ordersOnWeekends,
+  customerMostOrders,
+  customersOneTimeOnlyPeriod,
+  customerRetentionRate,
+  avgDaysBetweenOrders,
+  bottomProductsByUnits,
+  productsZeroSalesPeriod,
+  newestProductsAddedPeriod,
+  varietalTopSeller,
+  productCountTotal,
+  inventoryPerProductSummary,
+  inventoryByLocationMost,
+  avgDaysToShip,
+  ordersSameDayShipped,
+  ordersShippedWithinDays,
+  mostCommonShippingMethod,
+  avgShippingCostPerOrder,
+  ordersPendingShipment,
+  avgDiscountPerOrder,
+  refundTrendPeriod,
+  totalRefundedPeriod,
+  ordersBetweenHours,
+  compareProductSalesPeriods,
+  netAfterRefundsDiscounts,
+  avgTaxPerOrder,
+  crossSellByCategory,
+  customersMediumValue,
+  ordersNeverFulfilled,
+  completedOrdersPeriod,
+  allDiscountCodesUsed,
+  largestLineItemByQuantity,
+  productHighestAvgQty,
+  ordersContainingProduct,
+  ordersPendingOverDays,
+  repeatPurchaseRatePeriod,
+  avgTimeBetweenRepeat,
+  ordersWithMultipleLines,
+  guestCheckoutOrders,
+  emailSubscriberOrders,
 };

@@ -84,6 +84,306 @@ function classifyIntent(qRaw, ent = {}) {
   const q = qRaw.toLowerCase();
 
   // =========================================================================
+  // =========================================================================
+  // V7 priority block (Round-3 56-query upgrade).
+  // Add these BEFORE the v6 block so the new precise phrasings win over the
+  // broader v6 catch-alls.
+  // =========================================================================
+
+  // 1. orders placed today / yesterday / last 24h
+  if (/\b(?:how\s+many|number\s+of|count\s+of)\s+orders?\s+(?:placed|created|received|made|in)\b.*\b(?:today|yesterday|this\s+week|this\s+month|last\s+week|last\s+24\s+hours?)\b/.test(q) ||
+      /\borders?\s+(?:placed|created|received|made|in)\s+(?:today|yesterday|this\s+week|this\s+month|last\s+week|last\s+24\s+hours?)\b/.test(q) ||
+      /\borders?\s+in\s+the\s+last\s+24\s+hours?\b/.test(q)) {
+    return 'orders_by_period_count';
+  }
+
+  // 3. orders under $50 / below
+  if (/\borders?\s+(?:under|below|less\s+than|<=?)\s+\$?(\d+)/.test(q)) {
+    return 'orders_under_amount';
+  }
+  // 7. orders with total over $200 / total over / worth over
+  if (/\borders?\s+(?:with\s+total|worth|valued)\s+(?:over|above|>=?|more\s+than)\s+\$?(\d+)/.test(q)) {
+    return 'orders_above';
+  }
+
+  // 4. order count by day
+  if (/\b(?:order(?:s)?\s+)?(?:count|how\s+many|number)\s+(?:by\s+day|daily|by\s+day\s+of\s+week)\b/.test(q) ||
+      /\border\s+count\s+by\s+day\b/.test(q) ||
+      /\bdaily\s+order\s+count\b/.test(q)) {
+    return 'order_count_by_day';
+  }
+
+  // 5. orders on weekends
+  if (/\borders?\s+(?:placed\s+|were\s+placed\s+|made\s+|received\s+)?on\s+(?:the\s+)?weekends?\b|\bweekend\s+orders?\b|\borders?\s+were\s+placed\s+on\s+weekends?\b/.test(q)) {
+    return 'orders_on_weekends';
+  }
+
+  // 6. orders with a note (singular phrasing — the v6 "orders with notes" catches "notes")
+  if (/\borders?\s+(?:that\s+have|with|containing|having)\s+(?:a\s+)?notes?\b/.test(q) ||
+      /\bhow\s+many\s+orders?\s+have\s+(?:a\s+)?notes?\b/.test(q)) {
+    return 'orders_with_notes';
+  }
+
+  // 8. customer with most orders (storewide, lifetime; window phrasings stay on top_customers_by_order_count)
+  if (/\b(?:customer|who)\s+with\s+(?:the\s+)?most\s+orders\b/.test(q) ||
+      /\bcustomer\s+(?:that\s+|who\s+)?(?:has|have)\s+(?:the\s+)?most\s+orders\b/.test(q)) {
+    return 'customer_most_orders';
+  }
+
+  // 9. customers who ordered only once (period)
+  if (/\bcustomers?\s+(?:who\s+)?(?:ordered\s+only\s+once|only\s+once|one[- ]time|only\s+made\s+one\s+order|only\s+placed\s+one\s+order)\b/.test(q)) {
+    return 'customers_one_time_only_period';
+  }
+
+  // 10. customer retention rate
+  if (/\b(?:customer|repeat)\s+retention(?:\s+rate)?\b|\bretention\s+rate\b/.test(q)) {
+    return 'customer_retention_rate';
+  }
+
+  // 11. average days between orders (storewide; per-customer version is customer_frequency_profile)
+  if (/\b(?:average|mean|avg)\s+(?:days|time|gap)\s+(?:between|across)\s+orders\s+per\s+customer\b/.test(q) ||
+      (/\b(?:average|mean|avg)\s+(?:days|time|gap)\s+(?:between|across)\s+orders\b/.test(q) &&
+       !ent.customer && !ent.email)) {
+    return 'avg_days_between_orders';
+  }
+
+  // 12. bottom/worst/lowest products by units
+  if (/\b(?:bottom|worst|lowest|least\s+sold)\s+(?:\d+\s+)?(?:products?|items?|skus?)\s+by\s+units?\b/.test(q) ||
+      /\b(?:bottom|worst|lowest)\s+\d+\s+products?\b/.test(q)) {
+    return 'bottom_products_by_units';
+  }
+
+  // 13. products with zero sales this month / 30 days / etc.
+  if (/\b(?:products?|items?)\s+(?:with\s+(?:no|zero)\s+sales|that\s+haven'?t\s+sold|with\s+zero\s+sales)\b.*\b(?:this|in\s+the\s+last|past)\s+(?:month|30\s+days|week|7\s+days)\b/.test(q)) {
+    return 'products_zero_sales_period';
+  }
+
+  // 14. new products added in the last X
+  if (/\b(?:new\s+products?\s+added|new\s+items?|newest\s+products?|just\s+added|recently\s+added)\b.*\b(?:in\s+the\s+last|last|past|this)\s+(?:30\s+days|month|week|7\s+days|2\s+weeks)\b/.test(q)) {
+    return 'newest_products_added_period';
+  }
+
+  // 15. which varietal sells the most
+  if (/\b(?:which|what)\s+(?:varietal|wine\s+type|grape|variety)\s+(?:sells|sold|sell|is\s+selling)\s+(?:the\s+)?most\b/.test(q)) {
+    return 'varietal_top_seller';
+  }
+
+  // 16. how many products do we have (total catalog)
+  if (/\b(?:how\s+many|total|number\s+of)\s+products?\s+(?:do\s+we\s+have|are\s+there|in\s+our\s+catalog|in\s+the\s+catalog)\b/.test(q)) {
+    return 'product_count_total';
+  }
+
+  // 17. current inventory count per product / by product / summary
+  if (/\b(?:current|total)\s+inventory\s+(?:count\s+per\s+product|levels?\s+per\s+product|by\s+product|per\s+product|summary)\b/.test(q)) {
+    return 'inventory_per_product_summary';
+  }
+
+  // 18. which location has most inventory
+  if (/\b(?:which|what)\s+(?:location|warehouse|store)\s+(?:has|holds|with)\s+(?:the\s+)?most\s+inventory\b/.test(q)) {
+    return 'inventory_by_location_most';
+  }
+
+  // 19. average days to ship
+  if (/\b(?:average|avg)\s+(?:days|time)\s+(?:to\s+ship|before\s+shipping|to\s+send|until\s+shipped)\b/.test(q)) {
+    return 'avg_days_to_ship';
+  }
+
+  // 20. orders shipped same day
+  if (/\borders?\s+(?:that\s+)?shipped\s+same[- ]?day\b|\bsame[- ]?day\s+shipped\s+orders?\b|\bhow\s+many\s+orders?\s+shipped\s+same\s+day\b/.test(q)) {
+    return 'orders_same_day_shipped';
+  }
+
+  // 21. orders shipped within N days
+  if (/\borders?\s+(?:that\s+)?(?:shipped|fulfilled)\s+within\s+(\d+)\s+(?:business\s+)?days?\b/.test(q) ||
+      /\borders?\s+within\s+(\d+)\s+days?\b/.test(q)) {
+    return 'orders_shipped_within_days';
+  }
+
+  // 22. most common shipping method
+  if (/\b(?:most\s+common|popular|top)\s+(?:shipping|delivery)\s+(?:method|carrier|service)\b/.test(q)) {
+    return 'most_common_shipping_method';
+  }
+
+  // 23. average shipping cost per order
+  if (/\b(?:average|avg)\s+(?:shipping(?:\s+cost)?|freight)\s+per\s+order\b/.test(q)) {
+    return 'avg_shipping_cost_per_order';
+  }
+
+  // 24. orders pending shipment right now / waiting (NOT fulfillment — that's v6)
+  if (/\borders?\s+(?:pending|waiting|not\s+yet\s+shipped)\s+(?:shipment|shipping)\b|\borders?\s+pending\s+shipment\s+right\s+now\b/.test(q)) {
+    return 'orders_pending_shipment';
+  }
+
+  // 25. orders fulfilled this week (handled by existing orders_shipped_this_window) — but also "completed this week"
+  if (/\borders?\s+(?:fulfilled|completed|shipped|delivered)\s+(?:this|last)\s+(?:week|month|7\s+days)\b/.test(q)) {
+    return 'orders_shipped_this_window';
+  }
+
+  // 26. avg discount per order
+  if (/\b(?:average|avg)\s+(?:discount(?:\s+amount)?)\s+per\s+order\b/.test(q)) {
+    return 'avg_discount_per_order';
+  }
+
+  // 27. refunds this month / refund amount this month / quarter
+  if (/\brefunds?\s+(?:this|last)\s+(?:month|quarter|year)\s+(?:amount|total)?\b|\brefund\s+amount\s+this\s+(?:month|quarter)\b/.test(q)) {
+    return 'total_refunded_period';
+  }
+
+  // 28. average refund processing time / how long do refunds take
+  if (/\b(?:average|avg|how\s+long\s+do)\s+(?:refunds?\s+)?processing\s+time\b|\bhow\s+long\s+do\s+refunds?\s+take\b|\baverage\s+refund\s+(?:time|days|duration)\b/.test(q)) {
+    return 'refund_rate_and_avg';
+  }
+
+  // 29. products with most refund requests
+  if (/\bproducts?\s+with\s+(?:the\s+)?most\s+refunds?(?:\s+requests?)?\b|\bproducts?\s+with\s+highest\s+refund/.test(q)) {
+    return 'products_with_most_returns';
+  }
+
+  // 30. refund trend over last 30 days
+  if (/\brefund(?:s)?\s+trend\b|\brefund(?:s)?\s+(?:over|in)\s+(?:the\s+)?(?:last|past)\s+(?:30|7|60|90)\s+days?\b/.test(q)) {
+    return 'refund_trend_period';
+  }
+
+  // 31. total refunded this quarter
+  if (/\b(?:total|how\s+much)\s+refunded\s+(?:this|last)\s+(?:quarter|month|year|week)\b/.test(q)) {
+    return 'total_refunded_period';
+  }
+
+  // 32. busiest hour today  (existing busiest_hour catches "busiest hour yesterday")
+  // We already have busiest_period_pattern + busiest_hour earlier; "busiest hour today" should land on busiest_hour with timeframe=today.
+  if (/\bbusiest\s+hour\s+today\b|\bbusiest\s+hour\s+(?:this|on)\s+(?:week|month|today)\b/.test(q)) {
+    return 'busiest_hour';
+  }
+
+  // 33. which hour has most orders (storewide pattern); but if a specific
+  // timeframe like "yesterday/today/this week" is present, defer to v6
+  // busiest_hour which respects the window.
+  if (/\b(?:which|what)\s+hour\s+(?:has|had)\s+(?:the\s+)?most\s+orders?\b/.test(q) &&
+      !/\b(?:today|yesterday|this\s+week|last\s+week|this\s+month|last\s+month|on\s+\d)/.test(q)) {
+    return 'busiest_period_pattern';
+  }
+
+  // 34. orders placed between Hpm and Hpm  / between Ham and Hpm
+  if (/\borders?\s+(?:placed|created|received|made)\s+between\s+(\d{1,2})\s*(?:am|pm)?\s+(?:and|to|-)\s+(\d{1,2})\s*(?:am|pm)?\b/.test(q)) {
+    return 'orders_between_hours';
+  }
+
+  // 35. compare product sales this month to last month
+  if (/\b(?:compare|comparison|vs)\s+(?:product|products|item)\s+sales?\s+(?:this|last)\s+(?:month|week|quarter|year)\s+(?:to|vs|versus)\s+(?:last|this)\s+(?:month|week|quarter|year)\b/.test(q)) {
+    return 'compare_product_sales_periods';
+  }
+
+  // 36. net profit after refunds and discounts
+  if (/\bnet\s+(?:profit|revenue|income|earnings)\b.*\b(?:after|minus)\s+(?:refunds?|discounts?)\b|\bprofit\s+after\s+refunds?\s+and\s+discounts?\b|\btake\s+home\s+(?:after|minus)\s+(?:refunds?|discounts?)\b/.test(q)) {
+    return 'net_after_refunds_discounts';
+  }
+
+  // 37. average tax per order
+  if (/\b(?:average|avg)\s+(?:tax|taxes)\s+per\s+order\b/.test(q)) {
+    return 'avg_tax_per_order';
+  }
+
+  // 38. cross sell patterns by category
+  if (/\bcross[- ]?sell\s+(?:patterns?\s+(?:by|per|across)|by|per)\s+(?:category|type|varietal|categories|types|varietals)\b/.test(q)) {
+    return 'cross_sell_by_category';
+  }
+
+  // 39. medium value customers $100 to $500
+  if (/\b(?:medium|mid|middle)\s+(?:value|spending|range|tier)\s+customers?\b/.test(q)) {
+    return 'customers_medium_value';
+  }
+
+  // 40. orders still in draft status (handled by existing draft_orders_count)
+  if (/\borders?\s+(?:still\s+)?(?:in\s+)?(?:as\s+)?draft\s+status\b|\borders?\s+(?:still\s+)?in\s+draft\b/.test(q)) {
+    return 'draft_orders_count';
+  }
+
+  // 41. orders that were never fulfilled — but never fire if an order ref
+  // is present (order ref always wins; "open order #X" should hit the order
+  // drill-down family, not this).
+  if (!ent.orderRef &&
+      (/\borders?\s+(?:that\s+were\s+)?never\s+fulfilled\b|\borders?\s+(?:that\s+)?(?:were\s+)?never\s+shipped\b|\bunfulfilled\s+orders?\b/.test(q) ||
+       /\bopen\s+orders?\b(?!\s*#)/.test(q))) {
+    return 'orders_never_fulfilled';
+  }
+
+  // 42. completed orders this month
+  if (/\b(?:how\s+many|number\s+of|total)\s+(?:completed|fulfilled|closed)\s+orders?\s+(?:this|last)\s+(?:month|week|quarter|year)\b/.test(q)) {
+    return 'completed_orders_period';
+  }
+
+  // 43. all discount codes used
+  if (/\b(?:all|every|list\s+of|what)\s+(?:discount\s+code|discount\s+codes|promo\s+code|coupon\s+codes?)\s+(?:are\s+)?used\b/.test(q) ||
+      /\ball\s+discount\s+codes\b/.test(q)) {
+    return 'all_discount_codes_used';
+  }
+
+  // 44. orders grouped by discount code
+  if (/\borders?\s+(?:grouped|split|broken\s+down)\s+by\s+(?:discount|code|coupon)\b/.test(q)) {
+    return 'top_discount_codes';
+  }
+
+  // 45. orders from wholesale customers
+  if (/\borders?\s+(?:from|by|for)\s+(?:wholesale\s+customers?|wholesaler|reseller)\b/.test(q)) {
+    return 'orders_by_tag_wholesale';
+  }
+
+  // 46. orders from retail customers
+  if (/\borders?\s+(?:from|by|for)\s+(?:retail\s+customers?|consumer|individual\s+customers?)\b/.test(q)) {
+    return 'orders_by_tag_retail';
+  }
+
+  // 47. largest single line item by quantity
+  if (/\b(?:largest|biggest|highest)\s+(?:single\s+)?(?:line\s+item|item)\s+(?:by\s+)?(?:quantity|units|qty)\b/.test(q)) {
+    return 'largest_line_item_by_quantity';
+  }
+
+  // 48. product with highest average quantity per order
+  if (/\b(?:product|varietal|item)\s+(?:with|has(?:\s+the)?)\s+(?:the\s+)?(?:highest|most|best)\s+(?:average|avg)\s+(?:quantity|units?|qty)\s+per\s+order\b/.test(q)) {
+    return 'product_highest_avg_qty';
+  }
+
+  // 49. how many orders include <product> — when a varietal hint OR generic product token is present.
+  if (/\bhow\s+many\s+orders?\s+(?:include|with|containing|have|contain)\s+\w+/.test(q) &&
+      !/\bdiscount|gift|note|tag|attribute|liquor|wine|line\s+items|same\s+day|express|free\s+shipping/.test(q)) {
+    return 'orders_containing_product';
+  }
+
+  // 50. orders pending more than N days
+  if (/\borders?\s+(?:pending|unfulfilled|waiting)\s+(?:more\s+than|over)\s+(\d+)\s+days?\b/.test(q)) {
+    return 'orders_pending_over_days';
+  }
+
+  // 51. repeat purchase rate last 30 days
+  if (/\brepeat\s+(?:purchase|order)\s+rate\b|\brepurchase\s+rate\b/.test(q)) {
+    return 'repeat_purchase_rate_period';
+  }
+
+  // 52. average time between repeat purchases
+  if (/\b(?:average|avg|mean)\s+(?:time|days|gap)\s+(?:between|to)\s+(?:repeat|second|another)\s+(?:purchase|purchases|order|orders)\b/.test(q)) {
+    return 'avg_time_between_repeat';
+  }
+
+  // 53. orders with multiple line items
+  if (/\borders?\s+with\s+(?:multiple|more\s+than\s+one|several|\d+\+?)\s+(?:line\s+items?|items?|products?)\b/.test(q)) {
+    return 'orders_with_multiple_lines';
+  }
+
+  // 54. orders with single item only
+  if (/\borders?\s+with\s+(?:a\s+|only\s+|just\s+)?(?:one|single)\s+(?:item|product|line\s+item)(?:\s+only)?\b|\bsingle[- ]?item\s+orders?\b/.test(q)) {
+    return 'orders_single_line_item';
+  }
+
+  // 55. guest checkout orders
+  if (/\b(?:guest|anonymous|unregistered)\s+(?:checkout|order)s?\b|\bhow\s+many\s+guest\s+checkout\s+orders?\b/.test(q)) {
+    return 'guest_checkout_orders';
+  }
+
+  // 56. email subscriber orders
+  if (/\b(?:email|subscriber|newsletter)\s+(?:order|orders|buyers?|customers?)\b/.test(q)) {
+    return 'email_subscriber_orders';
+  }
+
   // V6 priority block: order status, shipping, payment, discounts, refunds,
   // operational, customer aggregates, etc. These ride above the older
   // intents so the phrasings from the 84-query spec route correctly.
@@ -1065,6 +1365,68 @@ function parse(questionRaw, { now } = {}) {
   if ((intent === 'orders_above' || intent === 'customers_with_orders_above') && !params.money) {
     const m = q.match(/(?:over|above|more\s+than|greater\s+than)\s+\$?(\d+)/);
     if (m) params.money = { op: '>', value: parseInt(m[1], 10) };
+  }
+
+  // v7 param extraction ---------------------------------------------------
+
+  // orders_under_amount: "orders under $50"
+  if (intent === 'orders_under_amount') {
+    const m = q.match(/(?:under|below|less\s+than|<=?)\s+\$?(\d+)/);
+    if (m) params.underAmount = parseInt(m[1], 10);
+  }
+
+  // orders_shipped_within_days: "orders shipped within 2 days"
+  if (intent === 'orders_shipped_within_days') {
+    const m = q.match(/within\s+(\d+)\s+(?:business\s+)?days?/);
+    if (m) params.shipWithinDays = parseInt(m[1], 10);
+  }
+
+  // orders_between_hours: "between 6pm and 9pm" / "between 18 and 21" / "between 9am and 5pm"
+  if (intent === 'orders_between_hours') {
+    const m = q.match(/between\s+(\d{1,2})\s*(am|pm)?\s+(?:and|to|-)\s+(\d{1,2})\s*(am|pm)?/);
+    if (m) {
+      const parse12 = (h, period) => {
+        let n = parseInt(h, 10);
+        if (period === 'pm' && n < 12) n += 12;
+        if (period === 'am' && n === 12) n = 0;
+        return n;
+      };
+      // Heuristic: if neither side has am/pm and start > end, treat both as 24h.
+      let a = parse12(m[1], (m[2] || '').toLowerCase());
+      let b = parse12(m[3], (m[4] || '').toLowerCase());
+      if (!m[2] && !m[4]) {
+        // Bare numbers — assume 24-hour; if a > b assume start=pm wraparound.
+        if (a < b) { /* keep */ }
+        else if (a < 12 && b < 12) { /* keep */ }
+        else { a = parse12(m[1], 'pm'); b = parse12(m[3], 'pm'); }
+      }
+      params.hourStart = a;
+      params.hourEnd = b;
+    }
+  }
+
+  // orders_pending_over_days: "orders pending more than 3 days"
+  if (intent === 'orders_pending_over_days') {
+    const m = q.match(/(?:more\s+than|over)\s+(\d+)\s+days?/);
+    if (m) params.pendingOverDays = parseInt(m[1], 10);
+  }
+
+  // customers_medium_value: "medium value customers $100 to $500"
+  if (intent === 'customers_medium_value') {
+    const m = q.match(/\$?(\d+)\s*(?:to|-)\s*\$?(\d+)/);
+    if (m) {
+      params.spendMin = parseInt(m[1], 10);
+      params.spendMax = parseInt(m[2], 10);
+    }
+  }
+
+  // orders_containing_product: extract the noun after "include / contain / have / with"
+  if (intent === 'orders_containing_product') {
+    // varietal already extracted by entities; otherwise grab the trailing noun
+    if (!params.varietal && !params.productContainsHint) {
+      const m = q.match(/\b(?:include|contain|with|containing|have)\s+([a-z][a-z\- ]{2,30}?)(?:\s|$|[?.,!])/);
+      if (m) params.productContainsHint = m[1].trim();
+    }
   }
 
   return { intent, params };

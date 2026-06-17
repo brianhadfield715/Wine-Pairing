@@ -174,7 +174,9 @@ const intentCases = [
   ['how many orders did we have each day last week','sales_time_series'],
   ['how many orders did we have by day last week',  'sales_time_series'],
   ['show me orders by day last week',               'sales_time_series'],
-  ['daily order count last week',                   'sales_time_series'],
+  // v7 upgrade: "daily order count" now routes to the dedicated grouped
+  // intent (order_count_by_day) which returns per-day rows directly.
+  ['daily order count last week',                   'order_count_by_day'],
   ['how much did we sell each day last week',       'sales_time_series'],
   ['revenue by day this month',                     'sales_time_series'],
   ['units sold by day last week',                   'sales_time_series'],

@@ -50,8 +50,12 @@ on conflict (id) do update set
 async function syncProducts() {
   let products = 0;
   let variants = 0;
+  // NOTE: Shopify's REST Products endpoint does NOT accept `status=any` (that
+  // is valid for Orders but returns ZERO products here). We pass an explicit
+  // comma-separated list so archived + draft products are still captured for
+  // historical analytics, matching the spirit of `status=any` used elsewhere.
   for await (const page of shopify.restPaginated(
-    '/products.json?limit=250&status=any',
+    '/products.json?limit=250&status=active,archived,draft',
     {},
     'products'
   )) {

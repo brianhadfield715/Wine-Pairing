@@ -450,8 +450,33 @@ function adminRequestLogger(req, res, next) {
 app.use('/admin', adminRequestLogger);
 
 app.post('/admin/sync/products', requireBasicAuth, requireDb, async (req, res) => {
-  try { res.json({ ok: true, result: await syncProductsMod.syncProducts() }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  // Manager-visible products sync. Always returns JSON. Surfaces flat
+  // products_written / variants_written / elapsed_ms fields so the admin UI
+  // can render them inline, while preserving the legacy `result` shape for
+  // backward compatibility with older clients.
+  const t0 = Date.now();
+  try {
+    const result = await syncProductsMod.syncProducts();
+    const elapsed_ms = Date.now() - t0;
+    res.json({
+      ok: true,
+      endpoint: 'products',
+      products_written: result.products,
+      variants_written: result.variants,
+      skus_written:     result.variants, // 1 variant = 1 SKU in this schema
+      elapsed_ms,
+      result,
+    });
+  } catch (e) {
+    const elapsed_ms = Date.now() - t0;
+    console.error('[admin/sync/products] FAILED', e && e.stack ? e.stack : e);
+    res.status(500).json({
+      ok: false,
+      endpoint: 'products',
+      error: e.message,
+      elapsed_ms,
+    });
+  }
 });
 
 app.post('/admin/sync/locations', requireBasicAuth, requireDb, async (req, res) => {

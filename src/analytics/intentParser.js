@@ -154,6 +154,17 @@ function classifyIntent(qRaw, ent = {}) {
     return 'new_vs_returning_by_month';
   }
 
+  // -- new customers by/per month/week (monthly time-series, not roster) --
+  // "chart of new customers for the last 12 months", "new customers by month",
+  // "new customer count by month". This is a MONTHLY count, not a list.
+  if (/\b(?:chart|graph|plot|show|trend|breakdown)\s+(?:of\s+|me\s+(?:a\s+)?(?:chart|graph)\s+of\s+)?new\s+customers?\b/.test(q) ||
+      /\bnew\s+customers?\s+(?:by|per)\s+(?:day|week|month)\b/.test(q) ||
+      /\bnew\s+customer(?:s)?\s+(?:count\s+)?(?:by|per)\s+(?:day|week|month)\b/.test(q) ||
+      /\bnew\s+customers?\s+for\s+the\s+last\s+\d+\s+months?\b/.test(q) ||
+      /\bnew\s+customer(?:s)?\s+(?:trend|over\s+time)\b/.test(q)) {
+    return 'new_vs_returning_by_month';
+  }
+
   // -- "what did we sell the most of" / "what sold the most" → top items
   if (/\bwhat\s+(?:did\s+we\s+sell\s+(?:the\s+)?most\s+of|sold\s+(?:the\s+)?most)\b/.test(q)) {
     if (ent.metric === 'revenue') return 'top_items_by_revenue';
@@ -1523,6 +1534,23 @@ function parse(questionRaw, { now } = {}) {
       const m = q.match(/\b(?:include|contain|with|containing|have)\s+([a-z][a-z\- ]{2,30}?)(?:\s|$|[?.,!])/);
       if (m) params.productContainsHint = m[1].trim();
     }
+  }
+
+  // For per-customer monthly charts, detect whether the user asked for an
+  // order count, units, or revenue. This drives a single-axis chart spec
+  // instead of the default dual-Y "revenue" view.
+  if (intent === 'customer_time_series') {
+    if (/\border\s+count\b|\b(?:order|orders)\s+(?:by|per)\s+(?:day|week|month)\b|\bhow\s+many\s+orders\b/.test(q)) {
+      params.timeSeriesMetric = 'orders';
+    } else if (/\b(?:units?|bottles?)\s+(?:by|per)\s+(?:day|week|month)\b|\b(?:total|how\s+many)\s+units\b/.test(q)) {
+      params.timeSeriesMetric = 'units';
+    } else if (/\b(?:revenue|spend|spent|sales|dollars?)\s+(?:by|per)\s+(?:day|week|month)\b/.test(q)) {
+      params.timeSeriesMetric = 'revenue';
+    }
+    // Grain (month/week/day) detection — overrides default grain.
+    if (/\bby\s+month\b|\bper\s+month\b/.test(q)) params.grain = 'month';
+    else if (/\bby\s+week\b|\bper\s+week\b/.test(q)) params.grain = 'week';
+    else if (/\bby\s+day\b|\bper\s+day\b|\bdaily\b/.test(q)) params.grain = 'day';
   }
 
   return { intent, params };

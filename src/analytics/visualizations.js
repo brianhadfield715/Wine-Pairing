@@ -113,6 +113,33 @@ function build(intent, rows, plan) {
     out.y_field = 'revenue';
     out.value_format = 'currency';
     out.chart_type = (plan && plan.params && plan.params.chartType) || 'bar';
+  } else if (intent === 'customer_time_series') {
+    // The builder returns {bucket, units, net_revenue, orders}. Pick the
+    // y-axis from the question: "order count" -> orders, "units" -> units,
+    // anything else -> revenue. This stops the dual-Y rendering and keeps
+    // a single, meaningful axis.
+    const metric = (plan && plan.params && plan.params.timeSeriesMetric)
+                || (plan && plan.params && plan.params.metric)
+                || 'revenue';
+    const yMap = { orders: 'orders', units: 'units', revenue: 'net_revenue' };
+    out.x_field = 'bucket';
+    out.y_field = yMap[metric] || 'net_revenue';
+    out.value_format = (metric === 'orders' || metric === 'units') ? 'integer' : 'currency';
+    out.chart_type = (plan && plan.params && plan.params.chartType) || 'line';
+    // Hint to the frontend that this is a single-axis chart even if multiple
+    // numeric columns are present in the row payload.
+    out.single_axis = true;
+    out.numeric_fields = ['orders', 'units', 'net_revenue'];
+  } else if (intent === 'new_vs_returning_by_month') {
+    // Explicit single-axis monthly chart. Rows: {bucket, new_customers,
+    // returning_customers, purchasing_customers}. Default y=new_customers
+    // unless the user asked specifically.
+    out.x_field = 'bucket';
+    out.y_field = 'new_customers';
+    out.value_format = 'integer';
+    out.chart_type = (plan && plan.params && plan.params.chartType) || 'line';
+    out.single_axis = true;
+    out.numeric_fields = ['new_customers', 'returning_customers', 'purchasing_customers'];
   } else if (def) {
     out.x_field = def.x_field;
     out.y_field = def.y_field;

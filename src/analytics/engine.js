@@ -157,14 +157,40 @@ async function answer(question) {
         email: parsed.params.email,
       });
       if (r.status === 'ambiguous') {
-        return {
-          question,
-          intent: parsed.intent,
-          domain: entry.domain,
-          answer: disambiguationAnswer(r.hint, r.candidates),
-          data: r.candidates,
-          meta: { status: 'disambiguation', resolution: { customer: r } },
-        };
+        // Auto-pick when the top-2 candidates have meaningfully different
+        // activity (one clearly more active). This handles the
+        // "two Brian Hadfields" case where one is the personal account and
+        // the other is a wine club / system account. We pick by orders_count
+        // descending, with total_spent as tiebreaker.
+        const sorted = (r.candidates || []).slice().sort((a, b) => {
+          const ao = Number(a.orders_count || 0);
+          const bo = Number(b.orders_count || 0);
+          if (bo !== ao) return bo - ao;
+          return Number(b.total_spent || 0) - Number(a.total_spent || 0);
+        });
+        const top = sorted[0];
+        const runnerUp = sorted[1];
+        const topOrders = Number(top && top.orders_count || 0);
+        const runnerOrders = Number(runnerUp && runnerUp.orders_count || 0);
+        // Auto-pick when the top candidate has ≥2x the runner-up's orders
+        // (clear preference). Otherwise stay with the disambiguation prompt
+        // so the user picks.
+        const shouldAutoPick = top && runnerUp && topOrders >= 3 && topOrders >= 2 * runnerOrders;
+        if (shouldAutoPick) {
+          plan.resolved.customer = top;
+          plan.resolved.customerNote =
+            `(showing the account with ${topOrders} orders; there is also a ${runnerOrders}-order account under the same name — ask by email if you meant the other one)`;
+          // Fall through to query execution.
+        } else {
+          return {
+            question,
+            intent: parsed.intent,
+            domain: entry.domain,
+            answer: disambiguationAnswer(r.hint, r.candidates),
+            data: r.candidates,
+            meta: { status: 'disambiguation', resolution: { customer: r } },
+          };
+        }
       }
       if (r.status === 'not_found') {
         // Bug A: if an email was provided but didn't match, say so clearly
@@ -411,7 +437,11 @@ async function answer(question) {
     question,
     intent: parsed.intent,
     domain: (buildResult.meta && buildResult.meta.domain) || entry.domain,
-    answer: format(parsed.intent, rows, plan),
+    answer: (() => {
+      const a = format(parsed.intent, rows, plan);
+      const note = plan && plan.resolved && plan.resolved.customerNote;
+      return note ? `${a}\n${note}` : a;
+    })(),
     data: rows,
     visualization,
     meta: {

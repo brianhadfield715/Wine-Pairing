@@ -908,6 +908,425 @@ const F = {
     );
     return `Reorder candidates (${rows.length}):\n${top.join('\n')}`;
   },
+
+  // ===== v6 formatters (manager-ready, mirror spec phrasing) ==============
+
+  order_status_breakdown(rows, plan) {
+    if (!rows.length) return 'No orders in that window.';
+    const buckets = rows.slice(0, 12).map((r) => {
+      const status = r.cancelled
+        ? 'canceled'
+        : `${r.financial_status}/${r.fulfillment_status}`;
+      return `${status}: ${intish(r.orders)} orders, ${money(r.revenue)}`;
+    });
+    return `Here are the order statuses${windowLabel(plan)}:\n${buckets.join('\n')}`;
+  },
+
+  fulfillment_status_breakdown(rows, plan) {
+    if (!rows.length) return 'No orders in that window.';
+    const parts = rows.map((r) => `${r.fulfillment_status}: ${intish(r.orders)}`);
+    return `Fulfillment status${windowLabel(plan)} — ${parts.join(' | ')}`;
+  },
+
+  orders_pending_fulfillment(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders are pending fulfillment${windowLabel(plan)} (${money(r.revenue)} in revenue).`;
+  },
+
+  refunded_orders_count(rows, plan) {
+    const r = rows[0] || {};
+    if (!r.orders) return `No refunded orders${windowLabel(plan)}.`;
+    return `There are ${intish(r.orders)} refunded orders${windowLabel(plan)} totaling ${money(r.refund_total)}.`;
+  },
+
+  cancelled_orders_count(rows, plan) {
+    const r = rows[0] || {};
+    return `You have ${intish(r.orders)} canceled orders${windowLabel(plan)} totaling ${money(r.cancelled_total)}.`;
+  },
+
+  draft_orders_count(rows) {
+    const r = rows[0] || {};
+    if (r.supported === false) {
+      return `Draft orders are not in the currently-synced data. Shopify keeps them in a separate /draft_orders endpoint that we don't sync today.`;
+    }
+    return `You have ${intish(r.drafts || 0)} draft orders.`;
+  },
+
+  archived_orders_count(rows, plan) {
+    const r = rows[0] || {};
+    return `You have ${intish(r.orders)} archived (closed) orders${windowLabel(plan)}.`;
+  },
+
+  orders_with_notes(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders have notes attached${windowLabel(plan)}.`;
+  },
+
+  orders_with_custom_attrs(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders have custom attributes${windowLabel(plan)}.`;
+  },
+
+  orders_by_referrer(rows, plan) {
+    if (!rows.length) return 'No orders in that window.';
+    const top = rows.slice(0, 8).map((r, i) =>
+      `${i + 1}. ${r.source_name} — ${intish(r.orders)} orders (${money(r.revenue)})`
+    );
+    return `Orders by referrer${windowLabel(plan)} — note: this is Shopify "source_name" (web/pos/iphone), not external referral attribution:\n${top.join('\n')}`;
+  },
+
+  orders_by_tag(rows, plan) {
+    if (rows.length === 1 && rows[0].orders != null && plan && plan.params && plan.params.tagHint) {
+      return `${intish(rows[0].orders)} orders tagged "${plan.params.tagHint}"${windowLabel(plan)} (${money(rows[0].revenue)}).`;
+    }
+    if (!rows.length) return 'No tagged orders in that window.';
+    const top = rows.slice(0, 12).map((r) => `${r.tag}: ${intish(r.orders)}`);
+    return `Top order tags${windowLabel(plan)} — ${top.join(' | ')}`;
+  },
+
+  highest_order_total(rows, plan) {
+    if (!rows.length) return 'No orders found.';
+    const r = rows[0];
+    const who = r.customer_name || r.customer_email || '(no customer attached)';
+    return `Your largest order was ${money(r.total_price)} (${r.order_name}) from ${who} on ${shortDate(r.occurred_at)}.`;
+  },
+
+  lowest_order_total(rows, plan) {
+    if (!rows.length) return 'No orders found.';
+    const r = rows[0];
+    const who = r.customer_name || r.customer_email || '(no customer attached)';
+    return `Your smallest order was ${money(r.total_price)} (${r.order_name}) from ${who} on ${shortDate(r.occurred_at)}.`;
+  },
+
+  orders_above(rows, plan) {
+    const r = rows[0] || {};
+    const v = (plan && plan.params && plan.params.money && plan.params.money.value) || 500;
+    if (!r.orders) return `No orders over ${money(v)}${windowLabel(plan)}.`;
+    return `There are ${intish(r.orders)} orders over ${money(v)}${windowLabel(plan)}, totaling ${money(r.revenue)} in revenue (range ${money(r.min_total)} – ${money(r.max_total)}).`;
+  },
+
+  avg_items_per_order(rows, plan) {
+    const r = rows[0] || {};
+    return `Average of ${r.avg_items_per_order || 0} items per order${windowLabel(plan)} (${intish(r.total_line_items)} line-items across ${intish(r.orders)} orders).`;
+  },
+
+  total_line_items_sold(rows, plan) {
+    const r = rows[0] || {};
+    return `You've sold ${intish(r.total_line_items)} line items total${windowLabel(plan)} (across ${intish(r.orders)} orders).`;
+  },
+
+  avg_quantity_per_line_item(rows, plan) {
+    const r = rows[0] || {};
+    return `Average of ${r.avg_quantity || 0} units per line item${windowLabel(plan)} (${intish(r.line_items)} line items).`;
+  },
+
+  order_completion_rate(rows, plan) {
+    const r = rows[0] || {};
+    const total = Number(r.total || 0);
+    const done = Number(r.completed || 0);
+    const cancelled = Number(r.cancelled || 0);
+    const pct = total ? (done / total) * 100 : 0;
+    return `Order completion rate${windowLabel(plan)}: ${pct.toFixed(1)}% (${intish(done)} fulfilled / ${intish(cancelled)} cancelled / ${intish(total)} total).`;
+  },
+
+  total_discounts_given(rows, plan) {
+    const r = rows[0] || {};
+    return `Total discounts${windowLabel(plan)}: ${money(r.total_discounts)} across ${intish(r.discounted_orders)} discounted orders (out of ${intish(r.orders)} total).`;
+  },
+
+  total_taxes_collected(rows, plan) {
+    const r = rows[0] || {};
+    return `Total tax collected${windowLabel(plan)}: ${money(r.total_tax)} across ${intish(r.orders)} orders.`;
+  },
+
+  orders_with_discounts(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders had discounts applied${windowLabel(plan)}, totaling ${money(r.discount_total)} in discounts given (avg ${money(r.avg_discount)}/order).`;
+  },
+
+  orders_without_discount(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders had no discount${windowLabel(plan)}.`;
+  },
+
+  avg_discount_percentage(rows, plan) {
+    const r = rows[0] || {};
+    return `Average discount: ${r.avg_pct || 0}%${windowLabel(plan)} (across ${intish(r.discounted_orders)} discounted orders).`;
+  },
+
+  top_discount_codes(rows, plan) {
+    if (!rows.length) return `No discount codes used${windowLabel(plan)}.`;
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.code} — ${intish(r.orders)} orders (${money(r.discount_total)} in discounts)`
+    );
+    return `Top discount codes${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  coupon_usage_rate(rows, plan) {
+    const r = rows[0] || {};
+    const w = Number(r.with_code || 0);
+    const t = Number(r.orders || 0);
+    const pct = t ? (w / t) * 100 : 0;
+    return `${pct.toFixed(1)}% of orders used a discount code${windowLabel(plan)} (${intish(w)} of ${intish(t)}).`;
+  },
+
+  refund_rate_and_avg(rows, plan) {
+    const r = rows[0] || {};
+    const tot = Number(r.orders || 0);
+    const ref = Number(r.refunded_orders || 0);
+    const pct = tot ? (ref / tot) * 100 : 0;
+    return `Refund rate: ${pct.toFixed(1)}%${windowLabel(plan)} (${intish(ref)} refunds out of ${intish(tot)} orders). Avg refund: ${money(r.avg_refund)}. Avg ${r.avg_days_to_refund || 0} days to refund.`;
+  },
+
+  products_with_most_returns(rows, plan) {
+    if (!rows.length) return `No refunded line items${windowLabel(plan)}. Note: refunds come from orders.raw.refunds; check that recent orders carry refund payloads.`;
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.product_title} (${r.sku || '-'}) — ${intish(r.refunded_units)} units returned (${money(r.refunded_value)})`
+    );
+    return `Products with most returns${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  orders_shipped_to_state(rows, plan) {
+    if (rows.length === 1 && rows[0].orders != null && plan && plan.params && plan.params.shippingStateHint) {
+      const r = rows[0];
+      return `Orders to ${plan.params.shippingStateHint}${windowLabel(plan)}: ${intish(r.orders)} totaling ${money(r.revenue)}.`;
+    }
+    if (!rows.length) return `No orders in that window.`;
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.state} — ${intish(r.orders)} orders (${money(r.revenue)})`
+    );
+    const note = rows.length ? `Your most common shipping state is ${rows[0].state} with ${intish(rows[0].orders)} orders.\n` : '';
+    return `${note}Top shipping states${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  international_orders_count(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders shipped internationally${windowLabel(plan)} (outside the US).`;
+  },
+
+  avg_fulfillment_time(rows, plan) {
+    const r = rows[0] || {};
+    if (!r.orders) return `Not enough fulfillment data${windowLabel(plan)}.`;
+    const note = r.has_precise
+      ? '(based on precise fulfillment timestamps from Shopify)'
+      : '(approximate — based on order closed_at; precise fulfillment timestamps not always present)';
+    return `Average fulfillment time: ${r.avg_days || 0} days${windowLabel(plan)} ${note} across ${intish(r.orders)} orders.`;
+  },
+
+  shipping_method_breakdown(rows, plan) {
+    if (!rows.length) return 'No shipping data in window.';
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.shipping_method} — ${intish(r.orders)} orders, ${money(r.shipping_revenue)} shipping (avg ${money(r.avg_shipping_cost)})`
+    );
+    return `Shipping methods${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  orders_by_shipping_title(rows, plan) {
+    const r = rows[0] || {};
+    const pat = plan && plan.params && plan.params.shippingTitlePattern;
+    const tag = pat ? pat.replace(/%/g, '') : 'matching method';
+    return `${intish(r.orders)} orders with shipping method "${tag}"${windowLabel(plan)} (${money(r.revenue)} in revenue, ${money(r.shipping_total)} in shipping).`;
+  },
+
+  free_shipping_orders(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders had free shipping${windowLabel(plan)} (${money(r.revenue)} in revenue).`;
+  },
+
+  payment_method_breakdown(rows, plan) {
+    if (!rows.length) return 'No payment data in window. (Payment gateway names come from orders.raw.payment_gateway_names.)';
+    const total = rows.reduce((a, r) => a + Number(r.orders || 0), 0) || 1;
+    const top = rows.slice(0, 10).map((r) => {
+      const pct = (Number(r.orders) / total * 100).toFixed(1);
+      return `${r.payment_gateway}: ${pct}% (${intish(r.orders)} orders, ${money(r.revenue)})`;
+    });
+    return `Payment method breakdown${windowLabel(plan)} — ${top.join(' | ')}`;
+  },
+
+  orders_by_gateway(rows, plan) {
+    const r = rows[0] || {};
+    const pat = plan && plan.params && plan.params.gatewayPattern;
+    const tag = pat ? pat.replace(/%/g, '') : 'matching gateway';
+    return `${intish(r.orders)} orders paid with ${tag}${windowLabel(plan)} (${money(r.revenue)}).`;
+  },
+
+  orders_after_hour(rows, plan) {
+    const r = rows[0] || {};
+    const h = (plan && plan.params && plan.params.afterHour) || 17;
+    const ampm = h === 12 ? '12 PM' : (h > 12 ? `${h - 12} PM` : `${h} AM`);
+    return `${intish(r.orders)} orders placed after ${ampm}${windowLabel(plan)} (${money(r.revenue)} in revenue).`;
+  },
+
+  orders_with_gift_cards(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders included a gift card${windowLabel(plan)}.`;
+  },
+
+  total_weight(rows, plan) {
+    const r = rows[0] || {};
+    const g = Number(r.total_grams || 0);
+    const kg = (g / 1000).toFixed(2);
+    const lb = (g * 0.00220462).toFixed(2);
+    return `Total weight of all orders${windowLabel(plan)}: ${kg} kg (~${lb} lb) across ${intish(r.orders_with_weight)} of ${intish(r.orders)} orders (some may not have a weight set).`;
+  },
+
+  heaviest_orders(rows, plan) {
+    if (!rows.length) return 'No order weight data in window.';
+    const top = rows.slice(0, 10).map((r, i) => {
+      const kg = ((Number(r.total_weight_g || 0)) / 1000).toFixed(2);
+      const who = r.customer_name ? ` — ${r.customer_name}` : '';
+      return `${i + 1}. ${r.order_name} — ${kg} kg (${money(r.total_price)})${who}`;
+    });
+    return `Heaviest orders${windowLabel(plan)}:\n${top.join('\n')}`;
+  },
+
+  avg_customer_ltv(rows) {
+    const r = rows[0] || {};
+    return `Your average customer LTV is ${money(r.avg_ltv)} (based on ${intish(r.customers_with_orders)} customers with ≥1 order, out of ${intish(r.customers_total)} total).`;
+  },
+
+  customer_order_frequency(rows) {
+    const r = rows[0] || {};
+    return `Customers order an average of ${r.avg_orders_per_customer || 0} times (across ${intish(r.customers_with_orders)} customers with ≥1 order).`;
+  },
+
+  repeat_customer_rate(rows) {
+    const r = rows[0] || {};
+    const rep = Number(r.repeat_customers || 0);
+    const w = Number(r.customers_with_orders || 0);
+    const tot = Number(r.customers_total || 0);
+    const pct = w ? (rep / w) * 100 : 0;
+    return `${pct.toFixed(1)}% of customers have ordered more than once (${intish(rep)} repeat customers out of ${intish(w)} with ≥1 order, ${intish(tot)} total).`;
+  },
+
+  customers_with_orders_above(rows, plan) {
+    const r = rows[0] || {};
+    const v = (plan && plan.params && plan.params.money && plan.params.money.value) || 1000;
+    return `${intish(r.customers)} customers have spent over ${money(v)} (total ${money(r.total_spend)}, avg ${money(r.avg_spend)} per customer).`;
+  },
+
+  customers_with_no_orders(rows) {
+    const r = rows[0] || {};
+    return `${intish(r.customers)} customers have no orders on file.`;
+  },
+
+  customer_locations_breakdown(rows) {
+    if (!rows.length) return `No customer location data available. Note: location comes from each customer's most recent shipping address.`;
+    const top = rows.slice(0, 10).map((r, i) => `${i + 1}. ${r.state} — ${intish(r.customers)} customers`);
+    return `Customer locations (most recent shipping state per customer):\n${top.join('\n')}`;
+  },
+
+  last_order_date_per_customer(rows) {
+    if (!rows.length) return 'No customer order data.';
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.customer_name || r.email || '#' + r.customer_id} — last ordered ${shortDate(r.last_order_at)} (${intish(r.days_since_last_order)}d ago, ${intish(r.order_count)} orders, ${money(r.total_spend)} lifetime)`
+    );
+    return `Most recent activity:\n${top.join('\n')}`;
+  },
+
+  first_time_buyer_orders(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders were from first-time customers${windowLabel(plan)} (${money(r.revenue)} in revenue).`;
+  },
+
+  orders_shipped_this_window(rows, plan) {
+    const r = rows[0] || {};
+    return `${intish(r.orders)} orders shipped${windowLabel(plan)} (${money(r.revenue)} in revenue).`;
+  },
+
+  weekday_vs_weekend(rows, plan) {
+    const r = rows[0] || {};
+    return `Weekday average: ${money(r.weekday_avg_revenue)}/day (${r.weekday_avg_orders || 0} orders) | Weekend average: ${money(r.weekend_avg_revenue)}/day (${r.weekend_avg_orders || 0} orders)${windowLabel(plan)}. Sample: ${intish(r.weekday_days)} weekdays, ${intish(r.weekend_days)} weekend days.`;
+  },
+
+  what_products_do_we_sell(rows) {
+    if (!rows.length) return 'No product catalog data.';
+    const top = rows.slice(0, 12).map((r, i) => `${i + 1}. ${r.category} — ${intish(r.products)} products`);
+    return `What we sell (top categories by product count):\n${top.join('\n')}`;
+  },
+
+  worst_selling_products(rows) {
+    if (!rows.length) return 'No worst-seller data.';
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.product_title} (${r.sku || '-'}) — ${intish(r.units_sold_30d)} sold last 30d, on hand ${intish(r.on_hand)}, last sold ${r.last_sold_at ? shortDate(r.last_sold_at) : 'never'}`
+    );
+    return `Worst-selling on-hand SKUs (30d):\n${top.join('\n')}`;
+  },
+
+  newest_products_added(rows) {
+    if (!rows.length) return 'No products on file.';
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.title} (${r.vendor || '-'}) — added ${shortDate(r.created_at)}`
+    );
+    return `Newest products added:\n${top.join('\n')}`;
+  },
+
+  inventory_by_location(rows) {
+    if (!rows.length) return 'No location inventory data.';
+    const top = rows.slice(0, 10).map((r) =>
+      `${r.location_name || '(unknown)'} — ${intish(r.inventory_items)} items, ${intish(r.on_hand_units)} units on hand`
+    );
+    return `Inventory by location:\n${top.join('\n')}`;
+  },
+
+  inventory_levels_by_product(rows) {
+    if (!rows.length) return 'No inventory data.';
+    const top = rows.slice(0, 12).map((r) =>
+      `${r.product_title}${r.variant_title ? ' · ' + r.variant_title : ''} (${r.sku || '-'}) — ${intish(r.on_hand)} on hand @ ${money(r.price)}`
+    );
+    return `Top inventory levels:\n${top.join('\n')}`;
+  },
+
+  products_not_in_inventory(rows) {
+    const r = rows[0] || {};
+    return `${intish(r.products_without_inventory)} products have no inventory data (out of ${intish(r.products_total)} total).`;
+  },
+
+  inventory_turnover_rate(rows) {
+    const r = rows[0] || {};
+    return `Inventory turnover (30 days): ${r.turnover_ratio || 0}× (${intish(r.units_sold_30d)} units sold ÷ ${intish(r.on_hand)} on hand).`;
+  },
+
+  days_of_inventory_remaining(rows) {
+    if (!rows.length) return 'No SKUs with both inventory and recent sales.';
+    const top = rows.slice(0, 10).map((r, i) =>
+      `${i + 1}. ${r.product_title} (${r.sku}) — ${r.days_of_inventory_remaining || 0} days (${intish(r.on_hand)} on hand, ${intish(r.units_sold_30d)} sold/30d)`
+    );
+    return `Days of inventory remaining (lowest first):\n${top.join('\n')}`;
+  },
+
+  week_over_week(rows) {
+    const cur = rows.find((r) => r.bucket === 'current') || {};
+    const prev = rows.find((r) => r.bucket === 'previous') || {};
+    const c = Number(cur.revenue || 0);
+    const p = Number(prev.revenue || 0);
+    const delta = c - p;
+    const pct = p > 0 ? (delta / p) * 100 : null;
+    const pctTxt = pct == null ? 'n/a' : `${pct > 0 ? '+' : ''}${pct.toFixed(1)}%`;
+    return `This week: ${money(c)} | Last week: ${money(p)} | Change: ${pctTxt}`;
+  },
+
+  year_over_year(rows) {
+    const cur = rows.find((r) => r.bucket === 'current') || {};
+    const prev = rows.find((r) => r.bucket === 'previous') || {};
+    const c = Number(cur.revenue || 0);
+    const p = Number(prev.revenue || 0);
+    const delta = c - p;
+    const pct = p > 0 ? (delta / p) * 100 : null;
+    const pctTxt = pct == null ? 'n/a' : `${pct > 0 ? '+' : ''}${pct.toFixed(1)}%`;
+    return `This year vs last year: ${money(c)} vs ${money(p)} (${pctTxt} change).`;
+  },
+
+  capability_unsupported(rows, plan) {
+    const key = (plan && plan.params && plan.params.unsupportedKey) || 'this metric';
+    const msgs = {
+      conversion_rate: `Conversion rate is not in the currently-synced data. Computing it requires session / visitor data (Shopify Analytics or GA), which we do not sync today. We can answer order-side metrics (orders, revenue, customers, AOV) directly.`,
+      abandoned_cart_rate: `Abandoned cart rate is not in the currently-synced data. Shopify keeps these in /checkouts.json, which we do not sync today.`,
+      email_campaign_performance: `Email campaign performance is not in the currently-synced data. Shopify Email / Klaviyo / Mailchimp data is not connected.`,
+      traffic_sources: `External traffic sources (Google / Facebook / Direct) are not in the currently-synced data. We do have Shopify "source_name" (web / pos / iphone / android) — try "orders by referrer".`,
+    };
+    return msgs[key] || `That metric isn't in the currently-synced data, so I can't compute it from order/customer/product records alone.`;
+  },
 };
 
 function format(intent, rows, plan) {

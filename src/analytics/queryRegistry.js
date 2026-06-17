@@ -160,6 +160,90 @@ const registry = {
 
   // --- v5: overlap share ----------------------------------------------
   order_overlap_share:          { builder: b.orderOverlapShare,           describe: 'Share of orders containing BOTH listed categories.',      domain: 'orders' },
+
+  // --- v6: orders status / fulfillment / drafts / archived ---------------
+  order_status_breakdown:        { builder: b.orderStatusBreakdown,        describe: 'Orders bucketed by financial / fulfillment / cancelled.', domain: 'orders' },
+  fulfillment_status_breakdown:  { builder: b.fulfillmentStatusBreakdown,  describe: 'Orders by fulfillment status.',                            domain: 'orders' },
+  orders_pending_fulfillment:    { builder: b.ordersPendingFulfillment,    describe: 'Open / unfulfilled / partial orders.',                     domain: 'orders' },
+  refunded_orders_count:         { builder: b.refundedOrdersCount,         describe: 'Number of orders that received a refund + refund total.',  domain: 'orders' },
+  cancelled_orders_count:        { builder: b.cancelledOrdersCount,        describe: 'Cancelled-order count + total cancelled value.',           domain: 'orders' },
+  draft_orders_count:            { builder: b.draftOrdersCount,            describe: 'Shopify draft orders (not synced).',                       domain: 'meta' },
+  archived_orders_count:         { builder: b.archivedOrdersCount,         describe: 'Closed / archived order count.',                           domain: 'orders' },
+  orders_with_notes:             { builder: b.ordersWithNotes,             describe: 'Orders that have a note attached.',                        domain: 'orders' },
+  orders_with_custom_attrs:      { builder: b.ordersWithCustomAttrs,       describe: 'Orders with custom note_attributes.',                      domain: 'orders' },
+  orders_by_referrer:            { builder: b.ordersByReferrer,            describe: 'Orders bucketed by source_name (web / pos / iphone / …).', domain: 'orders' },
+  orders_by_tag:                 { builder: b.ordersByTag,                 describe: 'Order counts by tag, or count for one tag.',               domain: 'orders' },
+
+  // --- v6: order extremes (BY TOTAL_PRICE, not unit price) ---------------
+  highest_order_total:           { builder: b.highestOrderTotal,           describe: 'Largest single order by total_price.',                     domain: 'orders' },
+  lowest_order_total:            { builder: b.lowestOrderTotal,            describe: 'Smallest single order by total_price (>0).',               domain: 'orders' },
+  orders_above:                  { builder: b.ordersAbove,                 describe: 'Number of orders above a $ threshold + their revenue.',    domain: 'orders' },
+
+  // --- v6: aggregations ----------------------------------------------------
+  avg_items_per_order:           { builder: b.avgItemsPerOrder,            describe: 'Average items per order in window.',                       domain: 'orders' },
+  total_line_items_sold:         { builder: b.totalLineItemsSold,          describe: 'Total line-item quantity sold in window.',                 domain: 'orders' },
+  avg_quantity_per_line_item:    { builder: b.avgQuantityPerLineItem,      describe: 'Average quantity per line item.',                          domain: 'orders' },
+  order_completion_rate:         { builder: b.orderCompletionRate,         describe: '% of orders fulfilled vs cancelled.',                      domain: 'orders' },
+
+  // --- v6: discounts / taxes / refunds -----------------------------------
+  total_discounts_given:         { builder: b.totalDiscountsGiven,         describe: 'Total discount dollars + # of discounted orders.',         domain: 'orders' },
+  total_taxes_collected:         { builder: b.totalTaxesCollected,         describe: 'Total tax dollars collected in window.',                   domain: 'orders' },
+  orders_with_discounts:         { builder: b.ordersWithDiscounts,         describe: 'Orders that had any discount applied.',                    domain: 'orders' },
+  orders_without_discount:       { builder: b.ordersWithoutDiscount,       describe: 'Orders with no discount applied.',                         domain: 'orders' },
+  avg_discount_percentage:       { builder: b.avgDiscountPercentage,       describe: 'Average discount % across discounted orders.',             domain: 'orders' },
+  top_discount_codes:            { builder: b.topDiscountCodes,            describe: 'Discount codes ranked by orders that used them.',          domain: 'orders' },
+  coupon_usage_rate:             { builder: b.couponUsageRate,             describe: '% of orders that used a discount code.',                   domain: 'orders' },
+  refund_rate_and_avg:           { builder: b.refundRateAndAvg,            describe: 'Refund rate %, avg refund, avg days to refund.',           domain: 'orders' },
+  products_with_most_returns:    { builder: b.productsWithMostReturns,     describe: 'Top SKUs by refund quantity.',                             domain: 'orders' },
+
+  // --- v6: shipping / fulfillment time -----------------------------------
+  orders_shipped_to_state:       { builder: b.ordersShippedToState,        describe: 'Orders shipped to a US state (or full breakdown).',        domain: 'orders' },
+  international_orders_count:    { builder: b.internationalOrdersCount,    describe: 'Orders with shipping_country != US.',                      domain: 'orders' },
+  avg_fulfillment_time:          { builder: b.avgFulfillmentTime,          describe: 'Average fulfillment time in days (approximate caveat).',   domain: 'orders' },
+  shipping_method_breakdown:     { builder: b.shippingMethodBreakdown,     describe: 'Orders + revenue grouped by shipping_method_title.',       domain: 'orders' },
+  orders_by_shipping_title:      { builder: b.ordersByShippingTitle,       describe: 'Orders whose shipping method matches a pattern.',          domain: 'orders' },
+  free_shipping_orders:          { builder: b.freeShippingOrders,          describe: 'Orders with $0 shipping or a free-named method.',          domain: 'orders' },
+
+  // --- v6: payment ------------------------------------------------------
+  payment_method_breakdown:      { builder: b.paymentMethodBreakdown,      describe: 'Orders + revenue grouped by payment gateway.',             domain: 'orders' },
+  orders_by_gateway:             { builder: b.ordersByGateway,             describe: 'Orders that used a specific payment gateway.',             domain: 'orders' },
+
+  // --- v6: misc operational ---------------------------------------------
+  orders_after_hour:             { builder: b.ordersAfterHour,             describe: 'Orders placed at/after a given hour of day.',              domain: 'orders' },
+  orders_with_gift_cards:        { builder: b.ordersWithGiftCards,         describe: 'Orders that included a gift-card line item.',              domain: 'orders' },
+  total_weight:                  { builder: b.totalWeight,                 describe: 'Total weight (grams) of all orders in window.',            domain: 'orders' },
+  heaviest_orders:               { builder: b.heaviestOrders,              describe: 'Heaviest individual orders in window.',                    domain: 'orders' },
+
+  // --- v6: customer aggregates ------------------------------------------
+  avg_customer_ltv:              { builder: b.avgCustomerLtv,              describe: 'Average lifetime spend across customers with ≥1 order.',   domain: 'customers' },
+  customer_order_frequency:      { builder: b.customerOrderFrequency,      describe: 'Average # of orders per customer.',                         domain: 'customers' },
+  repeat_customer_rate:          { builder: b.repeatCustomerRate,          describe: '% of customers with ≥2 orders (storewide, lifetime).',     domain: 'customers' },
+  customers_with_orders_above:   { builder: b.customersWithOrdersAbove,    describe: '# customers whose lifetime spend ≥ $threshold.',           domain: 'customers' },
+  customers_with_no_orders:      { builder: b.customersWithNoOrders,       describe: 'Customers with 0 orders on file.',                          domain: 'customers' },
+  customer_locations_breakdown:  { builder: b.customerLocationsBreakdown,  describe: 'Customers bucketed by last shipping_state.',                domain: 'customers' },
+  last_order_date_per_customer:  { builder: b.lastOrderDatePerCustomer,    describe: 'Each customer\'s last order date.',                         domain: 'customers' },
+  first_time_buyer_orders:       { builder: b.firstTimeBuyerOrders,        describe: 'Orders that were each customer\'s first order in window.',  domain: 'orders' },
+  orders_shipped_this_window:    { builder: b.ordersShippedThisWindow,     describe: 'Orders that were fulfilled within the window.',             domain: 'orders' },
+
+  // --- v6: weekday vs weekend -------------------------------------------
+  weekday_vs_weekend:            { builder: b.weekdayVsWeekend,            describe: 'Avg daily revenue weekday vs weekend.',                     domain: 'sales' },
+
+  // --- v6: products / catalog / inventory --------------------------------
+  what_products_do_we_sell:      { builder: b.whatProductsDoWeSell,        describe: 'Catalog overview by product_type.',                         domain: 'sales' },
+  worst_selling_products:        { builder: b.worstSellingProducts,        describe: 'On-hand SKUs with the lowest 30d/90d sell-through.',        domain: 'sales' },
+  newest_products_added:         { builder: b.newestProductsAdded,         describe: 'Most recently created products in the catalog.',            domain: 'sales' },
+  inventory_by_location:         { builder: b.inventoryByLocation,         describe: 'Inventory items + on-hand units per location.',             domain: 'inventory' },
+  inventory_levels_by_product:   { builder: b.inventoryLevelsByProduct,    describe: 'On-hand per variant (top N).',                              domain: 'inventory' },
+  products_not_in_inventory:     { builder: b.productsNotInInventory,      describe: 'Products with no positive inventory level on file.',        domain: 'inventory' },
+  inventory_turnover_rate:       { builder: b.inventoryTurnoverRate,       describe: '30d units sold / on-hand (turnover ratio).',                domain: 'inventory' },
+  days_of_inventory_remaining:   { builder: b.daysOfInventoryRemaining,    describe: 'Days of cover per SKU at 30d velocity.',                    domain: 'inventory' },
+
+  // --- v6: comparisons ---------------------------------------------------
+  week_over_week:                { builder: b.weekOverWeek,                describe: 'Last 7 days vs prior 7 days.',                              domain: 'sales' },
+  year_over_year:                { builder: b.yearOverYear,                describe: 'Last 365 days vs prior 365 days.',                          domain: 'sales' },
+
+  // --- v6: capability-not-supported (honest no-data answer) --------------
+  capability_unsupported:        { builder: b.capabilityUnsupported,       describe: 'Honest "not in synced data" response.',                     domain: 'meta' },
 };
 
 function get(intent) { return registry[intent] || null; }

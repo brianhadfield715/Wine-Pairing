@@ -30,25 +30,87 @@ const { format, money, intish } = require('./formatters');
 const resolver = require('./resolver');
 const visualizations = require('./visualizations');
 
-const HELP_TEXT = [
-  'I can answer broad questions about Harvest Wine Market sales, customers, and inventory. Try:',
-  '· "Top items sold yesterday" / "Best sellers last week"',
-  '· "How much did John Smith spend last month?" / "all time"',
-  '· "What did Terry White buy in the last 30 days?"',
-  '· "Top customers by spend" / "Who bought the most chardonnay this quarter?"',
-  '· "What sells together" / "What is often bought with <product>?"',
-  '· "Low stock high velocity" / "Dead inventory" / "Runout risk"',
-  '· "Top vendors this quarter" / "Vendor growth" / "Period over period"',
-].join('\n');
+const HELP_HEADER = "I don't recognize that question yet. The closest things I can answer right now are:";
+
+// Lightweight keyword → intent suggestion lookup for the "closest matches"
+// help response. We don't ship full vector search; this is a focused mapping
+// from common nouns/verbs to canonical intents.
+const SUGGEST_KEYWORDS = [
+  // sales
+  { kw: ['revenue','sales','sold','sell','sale'], suggestions: ['sales_summary','sales_time_series','period_over_period','dashboard_summary'] },
+  { kw: ['top','best','most'],                    suggestions: ['top_items_by_units','top_items_by_revenue','top_customers_by_spend','top_vendors'] },
+  // orders status / fulfillment
+  { kw: ['status','statuses','fulfilled','pending','cancelled','refund','refunded','canceled','draft','archived'],
+                                                  suggestions: ['order_status_breakdown','fulfillment_status_breakdown','orders_pending_fulfillment','refunded_orders_count','cancelled_orders_count'] },
+  // shipping
+  { kw: ['shipping','ship','shipped','delivery','pickup'],
+                                                  suggestions: ['shipping_method_breakdown','orders_shipped_to_state','avg_fulfillment_time','free_shipping_orders'] },
+  // discounts / refunds
+  { kw: ['discount','discounts','coupon','code','refund','refunds'],
+                                                  suggestions: ['total_discounts_given','top_discount_codes','coupon_usage_rate','refund_rate_and_avg','products_with_most_returns'] },
+  // taxes
+  { kw: ['tax','taxes'],                          suggestions: ['total_taxes_collected'] },
+  // payment
+  { kw: ['payment','paid','paypal','credit','gateway'],
+                                                  suggestions: ['payment_method_breakdown','orders_by_gateway'] },
+  // customer
+  { kw: ['customer','customers','buyer','ltv','lifetime','frequency','repeat','returning','churned','lapsed'],
+                                                  suggestions: ['avg_customer_ltv','customer_order_frequency','repeat_customer_rate','customers_with_no_orders','lapsed_customers','customers_with_orders_above'] },
+  // products / inventory
+  { kw: ['product','products','sku','skus','inventory','stock','catalog','category','categories'],
+                                                  suggestions: ['what_products_do_we_sell','inventory_count_in_stock','inventory_value_total','dead_inventory','newest_products_added'] },
+  // time series / dashboard
+  { kw: ['busiest','hour','day','peak'],          suggestions: ['busiest_hour','busiest_period_pattern','weekday_vs_weekend'] },
+  { kw: ['compare','vs','versus','growth'],       suggestions: ['period_over_period','week_over_week','year_over_year','vendor_growth'] },
+];
+
+function buildClosestMatches(question) {
+  const q = String(question || '').toLowerCase();
+  const scores = new Map();
+  for (const entry of SUGGEST_KEYWORDS) {
+    for (const k of entry.kw) {
+      if (q.includes(k)) {
+        for (const s of entry.suggestions) {
+          scores.set(s, (scores.get(s) || 0) + 1);
+        }
+      }
+    }
+  }
+  const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([s]) => s);
+  return ranked;
+}
+
+function describeIntent(name) {
+  const e = registry.get(name);
+  return e ? `· ${name} — ${e.describe}` : `· ${name}`;
+}
 
 function helpResponse(question, intent = 'general_help') {
+  const closest = buildClosestMatches(question);
+  let answer;
+  if (closest.length) {
+    answer = HELP_HEADER + '\n' + closest.map(describeIntent).join('\n') +
+      '\n\n(Phrase your question one of these ways, or ask me to add the metric if it isn\'t here.)';
+  } else {
+    answer = [
+      "I don't recognize that question yet. Some things I can answer:",
+      '· sales / revenue / units / orders for any timeframe',
+      '· order detail by # (e.g. "what was on order #37857")',
+      '· customer spend / LTV / order frequency / preferences',
+      '· repeat customer rate / new customer count',
+      '· top items / vendors / varietals / categories',
+      '· inventory value / counts / dead inventory / runout risk',
+      '· discounts / refunds / shipping / fulfillment breakdowns',
+      '· week-over-week / year-over-year comparisons',
+    ].join('\n');
+  }
   return {
     question,
     intent,
     domain: 'meta',
-    answer: HELP_TEXT,
-    data: registry.listIntents(),
-    meta: { status: 'help' },
+    answer,
+    data: closest.map((name) => ({ name, describe: (registry.get(name) || {}).describe || '' })),
+    meta: { status: 'help', suggestions: closest },
   };
 }
 

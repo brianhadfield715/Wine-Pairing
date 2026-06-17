@@ -840,4 +840,37 @@ app.get('/health', async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Wine pairing backend running on :${port}`));
+// ---------------------------------------------------------------------------
+// Idempotent startup migrator: applies every sql/00*_*.sql file in order
+// against the live Postgres if DATABASE_URL is configured. Every file in
+// this project uses `create … if not exists` / `create or replace view` so
+// repeated application is safe. Set DISABLE_STARTUP_MIGRATE=1 to skip.
+// ---------------------------------------------------------------------------
+async function applyStartupMigrations() {
+  if (!db.isEnabled()) return;
+  if (process.env.DISABLE_STARTUP_MIGRATE === '1') return;
+  const fs = require('fs');
+  const path = require('path');
+  const sqlDir = path.join(__dirname, 'sql');
+  let files;
+  try {
+    files = fs.readdirSync(sqlDir).filter((f) => /\.sql$/i.test(f)).sort();
+  } catch (e) {
+    console.warn('[startup-migrate] sql dir not found; skipping');
+    return;
+  }
+  for (const f of files) {
+    const sql = fs.readFileSync(path.join(sqlDir, f), 'utf8');
+    try {
+      await db.query(sql);
+      console.log(`[startup-migrate] applied ${f}`);
+    } catch (e) {
+      console.error(`[startup-migrate] FAILED ${f}: ${e.message}`);
+    }
+  }
+}
+
+app.listen(port, async () => {
+  console.log(`Wine pairing backend running on :${port}`);
+  try { await applyStartupMigrations(); } catch (e) { console.error('[startup-migrate] crashed:', e.message); }
+});

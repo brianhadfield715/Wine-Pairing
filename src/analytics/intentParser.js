@@ -83,6 +83,272 @@ function extractTwoVarietals(q) {
 function classifyIntent(qRaw, ent = {}) {
   const q = qRaw.toLowerCase();
 
+  // =========================================================================
+  // V6 priority block: order status, shipping, payment, discounts, refunds,
+  // operational, customer aggregates, etc. These ride above the older
+  // intents so the phrasings from the 84-query spec route correctly.
+  // =========================================================================
+
+  // --- "Capability not synced" graceful responses --------------------------
+  if (/\bconversion\s+rate\b/.test(q))                        return 'capability_unsupported_conversion_rate';
+  if (/\babandoned\s+cart(?:\s+rate)?\b/.test(q))             return 'capability_unsupported_abandoned_cart_rate';
+  if (/\bemail\s+campaign(?:\s+performance)?\b/.test(q))      return 'capability_unsupported_email';
+  if (/\btraffic\s+sources?\b/.test(q))                       return 'capability_unsupported_traffic_sources';
+
+  // --- Order extreme totals (LARGEST/HIGHEST/LOWEST single order) ----------
+  if (/\b(?:largest|biggest|highest[- ]?value|highest[- ]?total)\s+(?:order|sale)(?:\s+ever)?\b/.test(q) ||
+      /\bhighest\s+order\s+value\b/.test(q) ||
+      /\bbiggest\s+single\s+order\b/.test(q)) {
+    return 'highest_order_total';
+  }
+  if (/\b(?:lowest|smallest)[- ]?(?:order|sale|value|total)\b/.test(q) ||
+      /\blowest\s+order\s+value\b/.test(q)) {
+    return 'lowest_order_total';
+  }
+  if (/\borders?\s+(?:over|above|greater\s+than|>=?)\s+\$?(\d+)/.test(q)) {
+    return 'orders_above';
+  }
+
+  // --- Order status / refund / cancel / fulfill / drafts / archives ------
+  // fulfillment-specific status breakdown FIRST (it includes the word "status")
+  if (/\bfulfillment\s+status\s+breakdown\b|\b(?:fulfilled|unfulfilled)\s+breakdown\b|\bfulfillment\s+breakdown\b/.test(q)) {
+    return 'fulfillment_status_breakdown';
+  }
+  if (/\borders?\s+by\s+status\b|\border\s+status\s+breakdown\b|\bstatus\s+breakdown\b/.test(q)) {
+    return 'order_status_breakdown';
+  }
+  if (/\borders?\s+pending\s+fulfillment\b|\bpending\s+orders?\b/.test(q)) {
+    return 'orders_pending_fulfillment';
+  }
+  if (/\brefunded\s+orders?(?:\s+count)?\b|\bhow\s+many\s+refunds?\b|\bcount\s+of\s+refunds?\b/.test(q)) {
+    return 'refunded_orders_count';
+  }
+  if (/\bcancell?ed\s+orders?(?:\s+count)?\b|\bhow\s+many\s+cancell?ed\s+orders?\b/.test(q)) {
+    return 'cancelled_orders_count';
+  }
+  if (/\bdraft\s+orders?(?:\s+count)?\b/.test(q)) {
+    return 'draft_orders_count';
+  }
+  if (/\barchived\s+orders?(?:\s+count)?\b/.test(q)) {
+    return 'archived_orders_count';
+  }
+  if (/\borders?\s+with\s+notes?\b/.test(q)) {
+    return 'orders_with_notes';
+  }
+  if (/\borders?\s+with\s+custom\s+attributes?\b/.test(q)) {
+    return 'orders_with_custom_attrs';
+  }
+  if (/\borders?\s+(?:by\s+|grouped\s+by\s+)referrer\b|\border\s+source\s+breakdown\b/.test(q)) {
+    return 'orders_by_referrer';
+  }
+  if (/\btotal\s+tags?\s+used\s+on\s+orders\b|\border\s+tag\s+breakdown\b/.test(q)) {
+    return 'orders_by_tag';
+  }
+  if (/\borders?\s+tagged\s+(?:with\s+)?["']?([\w\- ]+)["']?\b/.test(q)) {
+    return 'orders_by_tag';
+  }
+
+  // --- Discounts / coupons / taxes / refund rate -------------------------
+  if (/\btotal\s+discounts?\s+given\b|\btotal\s+discount\s+(?:dollars|amount)\b/.test(q)) {
+    return 'total_discounts_given';
+  }
+  if (/\btotal\s+tax(?:es)?\s+collected\b/.test(q)) {
+    return 'total_taxes_collected';
+  }
+  if (/\borders?\s+with\s+discounts?\b/.test(q)) {
+    return 'orders_with_discounts';
+  }
+  if (/\borders?\s+without\s+(?:a\s+)?discounts?\b|\borders?\s+with\s+no\s+discount\b/.test(q)) {
+    return 'orders_without_discount';
+  }
+  if (/\baverage\s+discount\s+percentage\b|\bavg\s+discount\s+%\b|\baverage\s+discount\s+%\b/.test(q)) {
+    return 'avg_discount_percentage';
+  }
+  if (/\bwhich\s+discount\s+codes?\s+(?:are\s+)?used\s+(?:the\s+)?most\b|\btop\s+discount\s+codes?\b|\bmost\s+used\s+discount\s+codes?\b/.test(q)) {
+    return 'top_discount_codes';
+  }
+  if (/\bcoupon\s+usage\s+rate\b|\bdiscount\s+code\s+usage\s+rate\b/.test(q)) {
+    return 'coupon_usage_rate';
+  }
+  if (/\brefund\s+rate(?:\s+percentage)?\b|\baverage\s+refund\s+amount\b|\bavg\s+refund\b|\bhow\s+long\s+do\s+refunds?\s+take\b/.test(q)) {
+    return 'refund_rate_and_avg';
+  }
+  if (/\bproducts?\s+with\s+(?:the\s+)?most\s+returns?\b|\breturn\s+rate\s+by\s+product\b/.test(q)) {
+    return 'products_with_most_returns';
+  }
+
+  // --- Shipping / fulfillment time / address-based -----------------------
+  if (/\borders?\s+shipped\s+to\s+([a-z]{2,})\b/i.test(qRaw)) {
+    // Real state filter — leave the value to params (entities)
+    return 'orders_shipped_to_state';
+  }
+  if (/\bmost\s+common\s+shipping\s+state\b|\bshipping\s+state\s+breakdown\b|\borders?\s+by\s+(?:shipping\s+)?state\b/.test(q)) {
+    return 'orders_shipped_to_state';
+  }
+  if (/\binternational\s+orders?(?:\s+count)?\b|\borders?\s+shipped\s+(?:abroad|overseas|outside\s+the\s+us)\b/.test(q)) {
+    return 'international_orders_count';
+  }
+  if (/\baverage\s+shipping\s+time\b|\baverage\s+fulfillment\s+time\b|\baverage\s+order\s+lead\s+time\b|\bavg\s+shipping\s+time\b/.test(q)) {
+    return 'avg_fulfillment_time';
+  }
+  if (/\bshipping\s+cost\s+breakdown\b|\bshipping\s+method\s+breakdown\b|\borders?\s+by\s+shipping\s+method\b/.test(q)) {
+    return 'shipping_method_breakdown';
+  }
+  if (/\borders?\s+with\s+free\s+shipping\b|\bfree\s+shipping\s+orders?\b|\bfree\s+shipping\s+threshold\b/.test(q)) {
+    return 'free_shipping_orders';
+  }
+  if (/\borders?\s+with\s+same[- ]?day\s+shipping\b|\bsame[- ]?day\s+shipping\s+orders?\b/.test(q)) {
+    return 'orders_by_shipping_title_sameday';
+  }
+  if (/\borders?\s+with\s+express\s+shipping\b|\bexpress\s+shipping\s+orders?\b/.test(q)) {
+    return 'orders_by_shipping_title_express';
+  }
+  if (/\bstore\s+pick[- ]?up\s+orders?\b|\borders?\s+picked\s+up\s+in\s+store\b/.test(q)) {
+    return 'orders_by_shipping_title_pickup';
+  }
+  if (/\blocal\s+delivery\s+orders?\b|\borders?\s+with\s+local\s+delivery\b/.test(q)) {
+    return 'orders_by_shipping_title_localdelivery';
+  }
+  if (/\borders?\s+shipped\s+(?:this|last)\s+(?:week|month|day|year)\b/.test(q)) {
+    return 'orders_shipped_this_window';
+  }
+
+  // --- Payment gateway ---------------------------------------------------
+  if (/\bpayment\s+method\s+breakdown\b|\borders?\s+by\s+payment\s+method\b|\bpayment\s+gateway\s+breakdown\b/.test(q)) {
+    return 'payment_method_breakdown';
+  }
+  if (/\borders?\s+paid\s+with\s+credit\s+card\b|\bcredit\s+card\s+orders?\b/.test(q)) {
+    return 'orders_paid_credit';
+  }
+  if (/\borders?\s+paid\s+with\s+paypal\b|\bpaypal\s+orders?\b/.test(q)) {
+    return 'orders_paid_paypal';
+  }
+
+  // --- Misc operational --------------------------------------------------
+  if (/\borders?\s+placed\s+after\s+(\d{1,2})\s*(?:am|pm)?\b/.test(q)) {
+    return 'orders_after_hour';
+  }
+  if (/\bgift\s+card\s+orders?\b|\borders?\s+with\s+gift\s+cards?\b/.test(q)) {
+    return 'orders_with_gift_cards';
+  }
+  if (/\btotal\s+weight\s+of\s+(?:all\s+)?orders\b|\btotal\s+order\s+weight\b/.test(q)) {
+    return 'total_weight';
+  }
+  if (/\bheaviest\s+orders?\b/.test(q)) {
+    return 'heaviest_orders';
+  }
+  if (/\baverage\s+items?\s+per\s+order\b|\bavg\s+items?\s+per\s+order\b/.test(q)) {
+    return 'avg_items_per_order';
+  }
+  if (/\btotal\s+line\s+items?\s+sold\b|\btotal\s+line\s+items\b/.test(q)) {
+    return 'total_line_items_sold';
+  }
+  if (/\baverage\s+quantity\s+per\s+line\s+item\b|\bavg\s+quantity\s+per\s+line\s+item\b/.test(q)) {
+    return 'avg_quantity_per_line_item';
+  }
+  if (/\border\s+completion\s+rate\b|\bcompleted\s+order\s+rate\b/.test(q)) {
+    return 'order_completion_rate';
+  }
+
+  // --- Customer aggregates (storewide lifetime) --------------------------
+  if (/\baverage\s+customer\s+(?:lifetime\s+value|ltv)\b|\bavg\s+customer\s+ltv\b|\bmean\s+ltv\b/.test(q)) {
+    return 'avg_customer_ltv';
+  }
+  if (/^customer\s+order\s+frequency\b|\baverage\s+customer\s+order\s+frequency\b|\bavg\s+orders\s+per\s+customer\b/.test(q)) {
+    return 'customer_order_frequency';
+  }
+  if (/\brepeat\s+customer\s+rate\b|\bpercent(?:age)?\s+of\s+(?:repeat|returning)\s+customers\b/.test(q)) {
+    return 'repeat_customer_rate';
+  }
+  if (/\bcustomers?\s+(?:who\s+)?spent\s+(?:over|more\s+than|above|>=?)\s+\$?(\d+)/.test(q)) {
+    return 'customers_with_orders_above';
+  }
+  // "high value customers (this month)" → top_customers_by_spend with window
+  if (/\bhigh[- ]?value\s+(?:customers?|buyers?|spenders?)\b/.test(q)) {
+    return 'top_customers_by_spend';
+  }
+  // "churned customers in last 30 days" → lapsed_customers with lapsedDays
+  if (/\bchurned\s+customers?\b/.test(q)) {
+    return 'lapsed_customers';
+  }
+  if (/\bcustomers?\s+with\s+no\s+orders?\b|\bcustomers?\s+who\s+haven'?t\s+ordered\b/.test(q)) {
+    return 'customers_with_no_orders';
+  }
+  if (/\bcustomer\s+locations?\s+breakdown\b|\bcustomers?\s+by\s+state\b|\bcustomer\s+geo(?:graphic)?\s+breakdown\b/.test(q)) {
+    return 'customer_locations_breakdown';
+  }
+  if (/\blast\s+order\s+date\s+per\s+customer\b|\beach\s+customer'?s?\s+last\s+order\b/.test(q)) {
+    return 'last_order_date_per_customer';
+  }
+  if (/\borders?\s+from\s+first[- ]?time\s+(?:buyers?|customers?)\b/.test(q)) {
+    return 'first_time_buyer_orders';
+  }
+  // wholesale / retail tag-based
+  if (/\bwholesale\s+orders?\b/.test(q)) {
+    return 'orders_by_tag_wholesale';
+  }
+  if (/\bretail\s+orders?\b/.test(q)) {
+    return 'orders_by_tag_retail';
+  }
+
+  // --- Weekday vs weekend ------------------------------------------------
+  if (/\bweekday\s+vs\s+weekend\b|\bweekday\s+versus\s+weekend\b|\bweekend\s+vs\s+weekday\b/.test(q)) {
+    return 'weekday_vs_weekend';
+  }
+  if (/\bwhich\s+day\s+(?:of\s+the\s+week\s+)?has\s+the\s+most\s+orders\b/.test(q)) {
+    return 'busiest_period_pattern';
+  }
+  // Bare "busiest day of the week" / "busiest hour of the day" (no qualifier)
+  if (/\bbusiest\s+day\s+of\s+the\s+week\b|\bbusiest\s+hour\s+of\s+the\s+day\b/.test(q)) {
+    return 'busiest_period_pattern';
+  }
+
+  // --- Products / catalog / inventory ------------------------------------
+  if (/\bwhat\s+products?\s+do\s+we\s+sell\b/.test(q)) {
+    return 'what_products_do_we_sell';
+  }
+  if (/\bworst[- ]?selling\s+(?:products?|skus?)\b|\bworst\s+sellers?\b|\bproducts?\s+with\s+the\s+(?:fewest|least)\s+sales\b/.test(q)) {
+    return 'worst_selling_products';
+  }
+  if (/\bnewest\s+products?\s+added\b|\bmost\s+recently\s+added\s+products?\b|\brecently\s+added\s+products?\b/.test(q)) {
+    return 'newest_products_added';
+  }
+  if (/\binventory\s+by\s+location\b/.test(q)) {
+    return 'inventory_by_location';
+  }
+  if (/\binventory\s+levels?\s+by\s+product\b|\binventory\s+per\s+product\b/.test(q)) {
+    return 'inventory_levels_by_product';
+  }
+  if (/\bproducts?\s+not\s+in\s+inventory\b|\bproducts?\s+(?:that\s+)?have\s+no\s+inventory\b/.test(q)) {
+    return 'products_not_in_inventory';
+  }
+  if (/\binventory\s+turnover(?:\s+rate)?\b/.test(q)) {
+    return 'inventory_turnover_rate';
+  }
+  if (/\bdays\s+of\s+inventory\s+remaining\b|\bdays\s+of\s+stock\s+remaining\b/.test(q)) {
+    return 'days_of_inventory_remaining';
+  }
+  if (/^inventory\s+status\b|\binventory\s+overview\b|\bcurrent\s+inventory\s+status\b/.test(q)) {
+    return 'data_coverage_all';   // inventory + product coverage; existing intent
+  }
+
+  // --- Comparisons -------------------------------------------------------
+  if (/\bweek[- ]?over[- ]?week\s+comparison\b|\bweek[- ]?over[- ]?week\b(?!.*\bby\s)/.test(q)) {
+    return 'week_over_week';
+  }
+  if (/\byear[- ]?over[- ]?year(?:\s+growth)?\b|\byoy\b/.test(q)) {
+    return 'year_over_year';
+  }
+  // "revenue vs last month" / "this month vs last month" stays on period_over_period
+
+  // --- "How many SKUs do we have" → existing inventory_count_in_stock alias
+  if (/\bhow\s+many\s+skus?\s+(?:do\s+we\s+have|are\s+there)\b/.test(q)) {
+    return 'inventory_count_in_stock';
+  }
+  if (/\bproduct\s+categories?\s+breakdown\b|\bcategor(?:y|ies)\s+breakdown\b/.test(q)) {
+    return 'what_products_do_we_sell';
+  }
+
   // ---- -1. Order drill-down (always wins when an order ref is present) ----
   if (ent.orderRef) {
     // "how much was order #X" / "what was the total for order #X"
@@ -749,6 +1015,56 @@ function parse(questionRaw, { now } = {}) {
   // adds sort='asc' on the same builder.
   if (intent === 'vendor_decline') {
     params.sort = 'asc';
+  }
+
+  // --- v6: rewrite virtual aliases into real intents + params ------------
+  const aliasMap = {
+    capability_unsupported_conversion_rate:    { intent: 'capability_unsupported', set: { unsupportedKey: 'conversion_rate' } },
+    capability_unsupported_abandoned_cart_rate:{ intent: 'capability_unsupported', set: { unsupportedKey: 'abandoned_cart_rate' } },
+    capability_unsupported_email:              { intent: 'capability_unsupported', set: { unsupportedKey: 'email_campaign_performance' } },
+    capability_unsupported_traffic_sources:    { intent: 'capability_unsupported', set: { unsupportedKey: 'traffic_sources' } },
+    orders_paid_credit:                        { intent: 'orders_by_gateway',      set: { gatewayPattern: '%credit%' } },
+    orders_paid_paypal:                        { intent: 'orders_by_gateway',      set: { gatewayPattern: '%paypal%' } },
+    orders_by_tag_wholesale:                   { intent: 'orders_by_tag',          set: { tagHint: 'wholesale' } },
+    orders_by_tag_retail:                      { intent: 'orders_by_tag',          set: { tagHint: 'retail' } },
+    orders_by_shipping_title_sameday:          { intent: 'orders_by_shipping_title', set: { shippingTitlePattern: '%same%day%' } },
+    orders_by_shipping_title_express:          { intent: 'orders_by_shipping_title', set: { shippingTitlePattern: '%express%' } },
+    orders_by_shipping_title_pickup:           { intent: 'orders_by_shipping_title', set: { shippingTitlePattern: '%pick%up%' } },
+    orders_by_shipping_title_localdelivery:    { intent: 'orders_by_shipping_title', set: { shippingTitlePattern: '%local%deliver%' } },
+  };
+  if (aliasMap[intent]) {
+    const mapped = aliasMap[intent];
+    intent = mapped.intent;
+    Object.assign(params, mapped.set);
+  }
+
+  // Extract shipping-state hint from "orders shipped to <STATE>".
+  if (intent === 'orders_shipped_to_state') {
+    const m = q.match(/\borders?\s+shipped\s+to\s+([a-z]{2,})\b/);
+    if (m) params.shippingStateHint = m[1].toUpperCase();
+  }
+  // Extract tag from "orders tagged X" / "orders tagged with X".
+  if (intent === 'orders_by_tag' && !params.tagHint) {
+    const m = q.match(/\borders?\s+tagged\s+(?:with\s+)?["']?([\w][\w\- ]+?)["']?(?:\s|$|[?.,!])/);
+    if (m) params.tagHint = m[1].trim();
+  }
+  // Extract "orders placed after Npm" → after-hour.
+  if (intent === 'orders_after_hour') {
+    const m = q.match(/\bafter\s+(\d{1,2})\s*(am|pm)?\b/);
+    if (m) {
+      let h = parseInt(m[1], 10);
+      const period = (m[2] || '').toLowerCase();
+      if (period === 'pm' && h < 12) h += 12;
+      if (period === 'am' && h === 12) h = 0;
+      params.afterHour = h;
+    } else {
+      params.afterHour = 17; // default
+    }
+  }
+  // Money threshold for "orders over $N" / "customers spent over $N".
+  if ((intent === 'orders_above' || intent === 'customers_with_orders_above') && !params.money) {
+    const m = q.match(/(?:over|above|more\s+than|greater\s+than)\s+\$?(\d+)/);
+    if (m) params.money = { op: '>', value: parseInt(m[1], 10) };
   }
 
   return { intent, params };

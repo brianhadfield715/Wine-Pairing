@@ -296,6 +296,13 @@ const registry = {
   data_sync_status:              { builder: b.dataSyncStatus,               describe: 'How fresh the synced data is.',                             domain: 'meta' },
   oldest_order_date:             { builder: b.oldestOrderDate,              describe: 'Date of the very first order.',                             domain: 'meta' },
   newest_order_date:             { builder: b.newestOrderDate,              describe: 'Date of the most recent order.',                            domain: 'meta' },
+  // v9 (COGS / margin — 2026-09-12)
+  gross_margin_summary:          { builder: b.grossMarginSummary,           describe: 'Gross margin (revenue - COGS) for a window.',               domain: 'margin' },
+  gross_margin_by_month:         { builder: b.grossMarginByMonth,           describe: 'Gross margin by month.',                                    domain: 'margin' },
+  gross_margin_by_group:         { builder: b.grossMarginByGroup,           describe: 'Gross margin by category / vendor / product.',              domain: 'margin' },
+  margin_bottom_products:        { builder: b.marginBottomProducts,         describe: 'Lowest-margin products (min 5 units sold).',                domain: 'margin' },
+  commission_on_margin:          { builder: b.commissionOnMargin,           describe: 'Commission: rate% of monthly GM above a threshold.',        domain: 'margin' },
+  cost_coverage:                 { builder: b.costCoverage,                 describe: 'How many variants carry a unit cost.',                      domain: 'margin' },
   customer_first_last_order:     { builder: b.customerFirstLastOrder,       describe: 'First/last order dates for a single resolved customer.',    domain: 'customers', needsCustomer: true },
   customer_unique_count:         { builder: b.customerUniqueCount,          describe: 'Distinct purchasing customers + total + guest counts.',     domain: 'customers' },
   products_on_sale:              { builder: b.productsOnSale,               describe: 'Variants where compare_at_price > price (i.e. on sale).',   domain: 'sales' },

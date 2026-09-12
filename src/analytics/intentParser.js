@@ -84,6 +84,25 @@ function classifyIntent(qRaw, ent = {}) {
   const q = qRaw.toLowerCase();
 
   // =========================================================================
+  // V9 priority block: COGS / gross margin / commission (2026-09-12).
+  // Anchored on margin-family words so nothing here can shadow revenue intents.
+  // =========================================================================
+  if (/\bcommission\b/.test(q)) {
+    return 'commission_on_margin';
+  }
+  if (/\bcost\s+coverage\b|\bhow\s+many\s+(?:products|variants|items)\s+have\s+(?:a\s+)?costs?\b|\bdo\s+we\s+have\s+cost\s+data\b/.test(q)) {
+    return 'cost_coverage';
+  }
+  if (/\b(?:gross\s+margin|gm\b|margin|profit)/.test(q)) {
+    if (/\b(?:least|lowest|worst|thinnest)\b/.test(q)) return 'margin_bottom_products';
+    if (/\bby\s+(?:category|type)\b|\bper\s+category\b/.test(q)) return 'gross_margin_by_group';
+    if (/\bby\s+vendor\b|\bper\s+vendor\b/.test(q)) return 'gross_margin_by_group';
+    if (/\bby\s+(?:product|sku|item)\b|\bper\s+(?:product|sku|item)\b/.test(q)) return 'gross_margin_by_group';
+    if (/\bby\s+(?:month|week|day)\b|\bmonthly\b|\beach\s+month\b|\bper\s+month\b/.test(q)) return 'gross_margin_by_month';
+    return 'gross_margin_summary';
+  }
+
+  // =========================================================================
   // =========================================================================
   // V8 priority block (Round-4 33-failure fix).
   // =========================================================================
@@ -1396,6 +1415,24 @@ function parse(questionRaw, { now } = {}) {
     customerPair: ent.customerPair,       // { left, right } | null
     scope: deriveScope(intent, ent),
   };
+
+  // v9: margin group + commission plan parameters.
+  if (intent === 'gross_margin_by_group') {
+    params.marginGroup = /\bby\s+vendor\b|\bper\s+vendor\b/.test(q) ? 'vendor'
+                       : /\bby\s+(?:product|sku|item)\b|\bper\s+(?:product|sku|item)\b/.test(q) ? 'product'
+                       : 'category';
+  }
+  if (intent === 'commission_on_margin') {
+    const rateM = q.match(/(\d+(?:\.\d+)?)\s*%/);
+    if (rateM) params.commissionRate = Number(rateM[1]);
+    const thM = q.match(/(?:above|over|threshold\s+(?:of\s+)?)\s*\$?\s*([\d,]+(?:\.\d+)?)\s*(k\b)?/);
+    if (thM) {
+      let v = Number(thM[1].replace(/,/g, ''));
+      if (thM[2]) v *= 1000;
+      if (v > 100) params.commissionThreshold = v; // ignore the "5" in "5%"
+    }
+    // default window: all months, i.e. all_time unless the question narrowed it
+  }
 
   // Order-extreme direction (high vs low) for order_extreme_item_lookup.
   if (/\bcheapest|\bleast\s+expensive|\blowest[- ]?priced\b/.test(q)) {

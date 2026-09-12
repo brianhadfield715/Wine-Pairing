@@ -1683,6 +1683,62 @@ const F = {
     });
     return `New vs returning customers by month:\n${lines.join('\n')}`;
   },
+
+  // --- v9: COGS / margin (2026-09-12) ---------------------------------------
+
+  gross_margin_summary(rows, plan) {
+    const r = rows[0] || {};
+    if (r.gross_margin == null) return `No cost-covered sales${windowLabel(plan)} — run /admin/sync/costs first.`;
+    const cov = r.coverage_pct != null ? Number(r.coverage_pct) : null;
+    const covNote = cov != null && cov < 99.5
+      ? ` Cost data covers ${cov}% of revenue — margin figures are for the covered portion only.`
+      : '';
+    return `Gross margin${windowLabel(plan)}: ${money(r.gross_margin)} on ${money(r.covered_revenue)} revenue (${r.margin_pct}%). COGS ${money(r.total_cost)}, ${intish(r.orders)} orders.${covNote}`;
+  },
+
+  gross_margin_by_month(rows, plan) {
+    if (!rows.length) return `No sales${windowLabel(plan)}.`;
+    const lines = rows.map((r) => {
+      const month = new Date(r.bucket).toISOString().slice(0, 7);
+      if (r.gross_margin == null) return `${month}: revenue ${money(r.net_revenue)} — no cost data`;
+      return `${month}: GM ${money(r.gross_margin)} (${r.margin_pct}%) on ${money(r.net_revenue)} revenue`;
+    });
+    const tot = rows.reduce((a, r) => a + Number(r.gross_margin || 0), 0);
+    return `Gross margin by month${windowLabel(plan)}:\n${lines.join('\n')}\nTotal GM: ${money(tot)}`;
+  },
+
+  gross_margin_by_group(rows, plan) {
+    if (!rows.length) return `No cost-covered sales${windowLabel(plan)}.`;
+    const lines = rows.map((r, i) =>
+      `${i + 1}. ${r.grp} — GM ${money(r.gross_margin)} (${r.margin_pct != null ? r.margin_pct + '%' : 'n/a'}) on ${money(r.net_revenue)}`);
+    return `Gross margin by ${plan && plan.params && plan.params.marginGroup || 'category'}${windowLabel(plan)}:\n${lines.join('\n')}`;
+  },
+
+  margin_bottom_products(rows, plan) {
+    if (!rows.length) return `No cost-covered sales${windowLabel(plan)}.`;
+    const lines = rows.map((r, i) =>
+      `${i + 1}. ${r.grp} — ${r.margin_pct != null ? r.margin_pct + '%' : 'n/a'} margin (GM ${money(r.gross_margin)} on ${money(r.net_revenue)}, ${intish(r.units)} units)`);
+    return `Lowest-margin products${windowLabel(plan)} (min 5 units):\n${lines.join('\n')}`;
+  },
+
+  commission_on_margin(rows, plan) {
+    if (!rows.length) return `No sales${windowLabel(plan)}.`;
+    const pp = (plan && plan.params) || {};
+    const rate = pp.commissionRate != null ? pp.commissionRate : 5;
+    const th = pp.commissionThreshold != null ? pp.commissionThreshold : 34000;
+    const lines = rows.map((r) => {
+      const month = new Date(r.bucket).toISOString().slice(0, 7);
+      if (r.gross_margin == null) return `${month}: no cost data — commission $0.00`;
+      return `${month}: GM ${money(r.gross_margin)} → over threshold ${money(r.margin_over_threshold)} → commission ${money(r.commission)}`;
+    });
+    const tot = rows.reduce((a, r) => a + Number(r.commission || 0), 0);
+    return `Commission at ${rate}% of monthly gross margin above ${money(th)}${windowLabel(plan)}:\n${lines.join('\n')}\nTotal commission: ${money(tot)}`;
+  },
+
+  cost_coverage(rows) {
+    const r = rows[0] || {};
+    return `Cost data: ${intish(r.with_cost)} of ${intish(r.variants)} variants carry a unit cost (${r.coverage_pct}%). Last cost sync: ${r.last_cost_sync ? new Date(r.last_cost_sync).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'never — run /admin/sync/costs'}.`;
+  },
 };
 
 function format(intent, rows, plan) {

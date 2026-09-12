@@ -9,6 +9,7 @@ const syncProductsMod  = require('./src/sync/products');
 const syncLocationsMod = require('./src/sync/locations');
 const syncInventoryMod = require('./src/sync/inventory');
 const syncCustomersMod = require('./src/sync/customers');
+const syncCostsMod = require('./src/sync/costs');
 const syncOrdersMod    = require('./src/sync/orders');
 const backfillMod      = require('./src/sync/backfill');
 
@@ -492,6 +493,15 @@ app.post('/admin/sync/inventory', requireBasicAuth, requireDb, async (req, res) 
 app.post('/admin/sync/customers', requireBasicAuth, requireDb, async (req, res) => {
   try { res.json({ ok: true, result: await syncCustomersMod.syncCustomers(req.body || {}) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// COGS: unit costs from Shopify InventoryItem.cost (read-only GETs).
+app.post('/admin/sync/costs', requireBasicAuth, requireDb, async (req, res) => {
+  try { res.json({ ok: true, result: await syncCostsMod.syncCosts() }); }
+  catch (e) {
+    console.error('[admin/sync/costs] FAILED', e && e.stack ? e.stack : e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // /admin/sync/orders  — reliable, observable, always responds with JSON.

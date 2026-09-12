@@ -4651,4 +4651,166 @@ module.exports = {
   newVsReturningByMonth,
   oldestOrderDate,
   newestOrderDate,
+  // v9 (COGS / margin — 2026-09-12)
+  grossMarginSummary,
+  grossMarginByMonth,
+  grossMarginByGroup,
+  marginBottomProducts,
+  commissionOnMargin,
+  costCoverage,
 };
+
+// ---------------------------------------------------------------------------
+// v9: COGS / gross margin (fact_sales_margin = fact_sales + variant unit cost)
+// Every builder reports covered vs uncovered revenue so partial cost data is
+// always visible, never silently blended.
+// ---------------------------------------------------------------------------
+
+function grossMarginSummary(p) {
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  return {
+    text: `
+      select count(distinct fs.order_id)                          as orders,
+             sum(fs.quantity)                                     as units,
+             sum(fs.net_revenue)::numeric(14,2)                   as net_revenue,
+             sum(fs.net_revenue) filter (where fs.unit_cost is not null)::numeric(14,2) as covered_revenue,
+             sum(fs.line_cost)::numeric(14,2)                     as total_cost,
+             sum(fs.line_margin)::numeric(14,2)                   as gross_margin,
+             case when sum(fs.net_revenue) filter (where fs.unit_cost is not null) > 0
+                  then round(100.0 * sum(fs.line_margin)
+                       / sum(fs.net_revenue) filter (where fs.unit_cost is not null), 1)
+             end                                                  as margin_pct,
+             round(100.0 * coalesce(sum(fs.net_revenue) filter (where fs.unit_cost is not null), 0)
+                   / nullif(sum(fs.net_revenue), 0), 1)           as coverage_pct
+        from fact_sales_margin fs
+        ${where}`,
+    values: w.values,
+    meta: { intent: 'gross_margin_summary' },
+  };
+}
+
+function grossMarginByMonth(p) {
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  return {
+    text: `
+      select date_trunc('month', fs.occurred_at)                  as bucket,
+             count(distinct fs.order_id)                          as orders,
+             sum(fs.net_revenue)::numeric(14,2)                   as net_revenue,
+             sum(fs.net_revenue) filter (where fs.unit_cost is not null)::numeric(14,2) as covered_revenue,
+             sum(fs.line_margin)::numeric(14,2)                   as gross_margin,
+             case when sum(fs.net_revenue) filter (where fs.unit_cost is not null) > 0
+                  then round(100.0 * sum(fs.line_margin)
+                       / sum(fs.net_revenue) filter (where fs.unit_cost is not null), 1)
+             end                                                  as margin_pct
+        from fact_sales_margin fs
+        ${where}
+       group by 1
+       order by 1`,
+    values: w.values,
+    meta: { intent: 'gross_margin_by_month' },
+  };
+}
+
+// group = 'category' (product_type) | 'vendor' | 'product'
+function grossMarginByGroup(p) {
+  const group = p.marginGroup || 'category';
+  const col = group === 'vendor' ? 'fs.vendor'
+            : group === 'product' ? 'fs.product_title'
+            : `coalesce(pr.product_type, 'Uncategorized')`;
+  const join = group === 'category' ? 'left join products pr on pr.id = fs.product_id' : '';
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const values = [...w.values, p.limit || 15];
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  return {
+    text: `
+      select ${col}                                               as grp,
+             sum(fs.net_revenue)::numeric(14,2)                   as net_revenue,
+             sum(fs.line_margin)::numeric(14,2)                   as gross_margin,
+             case when sum(fs.net_revenue) filter (where fs.unit_cost is not null) > 0
+                  then round(100.0 * sum(fs.line_margin)
+                       / sum(fs.net_revenue) filter (where fs.unit_cost is not null), 1)
+             end                                                  as margin_pct
+        from fact_sales_margin fs
+        ${join}
+        ${where}
+       group by 1
+       having sum(fs.line_margin) is not null
+       order by gross_margin desc nulls last
+       limit $${w.nextIdx}`,
+    values,
+    meta: { intent: 'gross_margin_by_group', group },
+  };
+}
+
+function marginBottomProducts(p) {
+  const w = windowFragments('fs.occurred_at', p.timeframe, 1);
+  const values = [...w.values, p.limit || 15];
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  return {
+    text: `
+      select fs.product_title                                     as grp,
+             sum(fs.quantity)                                     as units,
+             sum(fs.net_revenue)::numeric(14,2)                   as net_revenue,
+             sum(fs.line_margin)::numeric(14,2)                   as gross_margin,
+             case when sum(fs.net_revenue) filter (where fs.unit_cost is not null) > 0
+                  then round(100.0 * sum(fs.line_margin)
+                       / sum(fs.net_revenue) filter (where fs.unit_cost is not null), 1)
+             end                                                  as margin_pct
+        from fact_sales_margin fs
+        ${where}
+       group by 1
+       having sum(fs.line_margin) is not null and sum(fs.quantity) >= 5
+       order by margin_pct asc nulls last
+       limit $${w.nextIdx}`,
+    values,
+    meta: { intent: 'margin_bottom_products' },
+  };
+}
+
+// Commission: rate% of monthly GM above a monthly threshold.
+// Defaults 5% over $34,000 (Brian's plan); both overridable from the question.
+function commissionOnMargin(p) {
+  const rate = p.commissionRate != null ? p.commissionRate : 5;
+  const threshold = p.commissionThreshold != null ? p.commissionThreshold : 34000;
+  const w = windowFragments('fs.occurred_at', p.timeframe, 3);
+  const where = w.fragments.length ? `where ${w.fragments.join(' and ')}` : '';
+  return {
+    text: `
+      with monthly as (
+        select date_trunc('month', fs.occurred_at)                as bucket,
+               sum(fs.net_revenue)::numeric(14,2)                 as net_revenue,
+               sum(fs.line_margin)::numeric(14,2)                 as gross_margin,
+               case when sum(fs.net_revenue) filter (where fs.unit_cost is not null) > 0
+                    then round(100.0 * sum(fs.line_margin)
+                         / sum(fs.net_revenue) filter (where fs.unit_cost is not null), 1)
+               end                                                as margin_pct
+          from fact_sales_margin fs
+          ${where}
+         group by 1
+      )
+      select bucket, net_revenue, gross_margin, margin_pct,
+             greatest(coalesce(gross_margin, 0) - $2, 0)::numeric(14,2)          as margin_over_threshold,
+             (greatest(coalesce(gross_margin, 0) - $2, 0) * $1 / 100.0)::numeric(14,2) as commission
+        from monthly
+       order by bucket`,
+    values: [rate, threshold, ...w.values],
+    meta: { intent: 'commission_on_margin', rate, threshold },
+  };
+}
+
+function costCoverage() {
+  return {
+    text: `
+      select count(*)                                             as variants,
+             count(*) filter (where vc.unit_cost is not null)     as with_cost,
+             round(100.0 * count(*) filter (where vc.unit_cost is not null)
+                   / nullif(count(*), 0), 1)                      as coverage_pct,
+             max(vc.synced_at)                                    as last_cost_sync
+        from variants v
+        left join variant_costs vc on vc.inventory_item_id = v.inventory_item_id`,
+    values: [],
+    meta: { intent: 'cost_coverage' },
+  };
+}

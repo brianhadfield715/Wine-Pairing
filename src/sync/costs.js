@@ -44,7 +44,8 @@ async function syncCosts() {
     const page = await shopify.rest(
       `/inventory_items.json?ids=${batch.join(',')}&limit=100`
     );
-    for (const item of page.inventory_items || []) {
+    // shopify.rest returns { body, headers, status }
+    for (const item of (page.body && page.body.inventory_items) || []) {
       const v = byItem.get(String(item.id)) || {};
       const cost = item.cost != null && item.cost !== '' ? Number(item.cost) : null;
       if (cost != null) withCost += 1;
